@@ -4,6 +4,7 @@ from tkinter import ttk, messagebox, filedialog
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import difflib
+from typing import List  # ★追加
 
 APP_NAME = "Text Replace"
 RULES_FILE = Path.home() / ".text_replace_rules.json"
@@ -16,9 +17,6 @@ class Rule:
     dst: str
 
 
-# -----------------------------
-# Tooltip
-# -----------------------------
 class Tooltip:
     def __init__(self, master: tk.Tk):
         self.master = master
@@ -42,9 +40,6 @@ class Tooltip:
         self.tip = None
 
 
-# -----------------------------
-# Scrollable Frame (for rules)
-# -----------------------------
 class ScrollableFrame(ttk.Frame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -65,8 +60,7 @@ class ScrollableFrame(ttk.Frame):
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        # Mouse wheel (Windows/Mac)
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)       # Windows
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)       # Windows/Mac
         self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux)   # Linux
         self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux)
 
@@ -86,11 +80,8 @@ class ScrollableFrame(ttk.Frame):
             self.canvas.yview_scroll(1, "units")
 
 
-# -----------------------------
-# Rule Manager (Row widgets)
-# -----------------------------
-class RuleManager(tk.Toplevel):
-    def __init__(self, master, rules: list[Rule], on_save):
+class RuleManager(tk.Toplevel):  # ★TopLevelではなくToplevel（誤字防止）
+    def __init__(self, master, rules: List[Rule], on_save):
         super().__init__(master)
         self.title("辞書（置換ルール）")
         self.geometry("980x520")
@@ -156,7 +147,7 @@ class RuleManager(tk.Toplevel):
             hint = ttk.Label(self.sf.inner, text="「＋ 追加」でルールを作成できます。", foreground="gray")
             hint.pack(anchor="w", padx=6, pady=10)
 
-    def _create_row(self, idx: int, rule: Rule):
+    def _create_row(self, idx, rule: Rule):
         row = ttk.Frame(self.sf.inner)
         row.pack(fill="x", pady=4)
 
@@ -197,14 +188,14 @@ class RuleManager(tk.Toplevel):
         self.lift()
         self.focus_force()
 
-    def delete_row(self, idx: int):
+    def delete_row(self, idx):
         self.commit_to_model()
         if idx < 0 or idx >= len(self.rules):
             return
         r = self.rules[idx]
         ok = messagebox.askyesno(
             "削除確認",
-            f"この行を削除しますか？\n\n置換前: {r.src}\n置換後: {r.dst}",
+            "この行を削除しますか？\n\n置換前: {}\n置換後: {}".format(r.src, r.dst),
             parent=self
         )
         if not ok:
@@ -218,7 +209,7 @@ class RuleManager(tk.Toplevel):
         self.lift()
         self.focus_force()
 
-    def move_row(self, idx: int, direction: int):
+    def move_row(self, idx, direction):
         self.commit_to_model()
         new_idx = idx + direction
         if new_idx < 0 or new_idx >= len(self.rules):
@@ -247,26 +238,20 @@ class RuleManager(tk.Toplevel):
         self.focus_force()
 
 
-# -----------------------------
-# Main App
-# -----------------------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
         self.geometry("1100x780")
 
-        self.rules: list[Rule] = self.load_rules()
+        self.rules = self.load_rules()
         self.tooltip = Tooltip(self)
 
         top = ttk.Frame(self, padding=10)
         top.pack(fill="x")
 
         ttk.Button(top, text="辞書（ルール）", command=self.open_rules).pack(side="left")
-
-        # ★追加：TXT読み込みボタン（入力欄を全削除→ファイル内容を表示）
         ttk.Button(top, text="TXTを読み込み", command=self.open_text_file).pack(side="left", padx=8)
-
         ttk.Button(top, text="置換実行", command=self.replace).pack(side="left", padx=8)
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
@@ -293,7 +278,6 @@ class App(tk.Tk):
         self.output = tk.Text(out_frame, wrap="word")
         self.output.pack(fill="both", expand=True)
 
-        self.output.tag_configure("chg", background="#fff3b0")
         self.output.bind("<Motion>", self.on_hover)
         self.output.bind("<Leave>", lambda e: self.tooltip.hide())
 
@@ -303,7 +287,6 @@ class App(tk.Tk):
         if not self.input.get("1.0", "end-1c").strip():
             self.input.insert("1.0", "ここに貼り付け → 置換実行\n")
 
-    # ★追加：ファイル読み込み（入力欄を全削除して差し替え）
     def open_text_file(self):
         path = filedialog.askopenfilename(
             title="テキストファイルを選択",
@@ -314,23 +297,20 @@ class App(tk.Tk):
         try:
             content = Path(path).read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            # Shift-JISなどの可能性を考慮（追加で安全に）
             try:
                 content = Path(path).read_text(encoding="cp932")
             except Exception as e:
-                messagebox.showerror("読み込みエラー", f"文字コードの判定に失敗しました:\n{e}")
+                messagebox.showerror("読み込みエラー", "文字コードの判定に失敗しました:\n{}".format(e))
                 return
         except Exception as e:
             messagebox.showerror("読み込みエラー", str(e))
             return
 
-        # 既存テキストを全削除 → 新規表示
         self.input.delete("1.0", "end")
         self.input.insert("1.0", content)
-        self.status.config(text=f"読み込みました: {Path(path).name}")
+        self.status.config(text="読み込みました: {}".format(Path(path).name))
 
-    # --- persistence ---
-    def load_rules(self) -> list[Rule]:
+    def load_rules(self) -> List[Rule]:
         if RULES_FILE.exists():
             try:
                 data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
@@ -356,9 +336,8 @@ class App(tk.Tk):
     def update_status(self):
         enabled = sum(1 for r in self.rules if r.enabled and r.src)
         total = len(self.rules)
-        self.status.config(text=f"適用ルール: {enabled}/{total}（上から順に実行）")
+        self.status.config(text="適用ルール: {}/{}（上から順に実行）".format(enabled, total))
 
-    # --- UI actions ---
     def open_rules(self):
         RuleManager(self, self.rules, on_save=self.save_rules)
 
@@ -370,7 +349,6 @@ class App(tk.Tk):
             messagebox.showwarning("ルールなし", "適用するルールがありません。\n辞書（ルール）で追加・ONにしてください。")
             return
 
-        # 置換は「上から順に1回ずつ」適用（循環しません）
         out = src_text
         for r in enabled_rules:
             out = out.replace(r.src, r.dst)
@@ -397,9 +375,8 @@ class App(tk.Tk):
         if not path:
             return
         Path(path).write_text(text, encoding="utf-8")
-        self.status.config(text=f"保存しました: {Path(path).name}")
+        self.status.config(text="保存しました: {}".format(Path(path).name))
 
-    # --- highlight / hover ---
     def clear_highlight(self):
         for tag in list(self.tag_map.keys()):
             try:
@@ -418,19 +395,18 @@ class App(tk.Tk):
         for op, i1, i2, j1, j2 in sm.get_opcodes():
             if op == "equal":
                 continue
-
             if op in ("replace", "insert") and j1 != j2:
                 k += 1
-                tag = f"chg_{k}"
+                tag = "chg_{}".format(k)
                 self.output.tag_configure(tag, background="#fff3b0")
-                self.output.tag_add(tag, f"1.0+{j1}c", f"1.0+{j2}c")
+                self.output.tag_add(tag, "1.0+{}c".format(j1), "1.0+{}c".format(j2))
 
                 before = original[i1:i2]
                 disp = before if len(before) <= 160 else before[:160] + "…"
                 self.tag_map[tag] = disp
 
     def on_hover(self, event):
-        idx = self.output.index(f"@{event.x},{event.y}")
+        idx = self.output.index("@{},{}".format(event.x, event.y))
         tags = self.output.tag_names(idx)
         dyn = None
         for t in tags:
@@ -441,13 +417,11 @@ class App(tk.Tk):
         if dyn and dyn in self.tag_map:
             if self._last_hover_tag != dyn:
                 self._last_hover_tag = dyn
-                self.tooltip.show(self.winfo_pointerx(), self.winfo_pointery(), f"置換前: {self.tag_map[dyn]}")
+                self.tooltip.show(self.winfo_pointerx(), self.winfo_pointery(), "置換前: {}".format(self.tag_map[dyn]))
         else:
             self._last_hover_tag = None
             self.tooltip.hide()
 
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
-
+    App().mainloop()
