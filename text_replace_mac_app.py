@@ -1,3 +1,4 @@
+import sys
 import json
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -608,12 +609,45 @@ def resource_path(rel: str) -> str:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return str(base / rel)
 
+
 # -----------------------------
 # Main App
 # -----------------------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+
+        # --- Style: macOS だけ ttk で色を出す（Windows は tk.Button を使う） ---
+        self._use_ttk_colored_button = (sys.platform == "darwin")
+
+        if self._use_ttk_colored_button:
+            self.style = ttk.Style(self)
+            # macOS の Aqua は背景色が効きにくいので clam に切り替え
+            try:
+                self.style.theme_use("clam")
+            except Exception:
+                pass
+
+            # 置換実行ボタン用スタイル（緑）
+            self.style.configure(
+                "Replace.TButton",
+                padding=(10, 4),
+                foreground="white",
+                background="#2E7D32",
+                borderwidth=1,
+                focusthickness=0,
+            )
+            self.style.map(
+                "Replace.TButton",
+                background=[
+                    ("active", "#1B5E20"),
+                    ("pressed", "#144A19"),
+                    ("disabled", "#A7A7A7"),
+                ],
+                foreground=[
+                    ("disabled", "#F2F2F2"),
+                ],
+            )
 
         try:
             img = tk.PhotoImage(file=resource_path("appicon.png"))
@@ -689,19 +723,30 @@ class App(tk.Tk):
         self.apply_button.pack(side="left", padx=(6, 8))
         self.apply_button.bind("<Button-1>", lambda _e: (self.open_apply_picker(), "break"))
 
-        self.replace_btn = tk.Button(
-            row1,
-            text="置換実行",
-            command=self.replace,
-            bg="#2E7D32",
-            fg="white",
-            activebackground="#1B5E20",
-            activeforeground="white",
-            relief="solid",
-            bd=1,
-            padx=10,
-            pady=4,
-        )
+        # --- 置換実行ボタン（OSで出し分け） ---
+        if self._use_ttk_colored_button:
+            # macOS：ttk + style
+            self.replace_btn = ttk.Button(
+                row1,
+                text="置換実行",
+                command=self.replace,
+                style="Replace.TButton",
+            )
+        else:
+            # Windows/Linux：tk.Button の bg が一番確実
+            self.replace_btn = tk.Button(
+                row1,
+                text="置換実行",
+                command=self.replace,
+                bg="#2E7D32",
+                fg="white",
+                activebackground="#1B5E20",
+                activeforeground="white",
+                relief="solid",
+                bd=1,
+                padx=10,
+                pady=4,
+            )
         self.replace_btn.pack(side="left", padx=(0, 10))
 
         ttk.Button(row1, text="TXT読み込み", command=self.open_text_file).pack(side="left", padx=(0, 8))
@@ -1174,22 +1219,46 @@ class App(tk.Tk):
             on_closed=_closed,
         )
 
-        # ★メインと同じ幅、出力エリアに「ちょうど重なる」位置に配置
+        # ★メインと同じ幅、初期表示は「下端をメイン下端に合わせる」（実高さで2段階補正）
         try:
             self.update_idletasks()
+            self._rule_manager_dialog.update_idletasks()
 
-            main_w = self.winfo_width()
             main_x = self.winfo_rootx()
+            main_y = self.winfo_rooty()
+            main_w = self.winfo_width()
+            main_h = self.winfo_height()
+            main_bottom = main_y + main_h
 
-            out_y = self.output.winfo_rooty()
+            # まずは希望サイズ（出力枠の高さをベース）
             out_h = self.output.winfo_height()
 
-            w = max(520, main_w)
-            h = max(320, out_h)
-            x = main_x
-            y = out_y
+            req_w = self._rule_manager_dialog.winfo_reqwidth()
+            req_h = self._rule_manager_dialog.winfo_reqheight()
 
+            Y_OFFSET = 30
+            w = max(520, main_w, req_w)
+            h = max(320, out_h, req_h)
+
+            x = main_x
+            y = main_bottom - h - Y_OFFSET# 下端合わせ（仮）
+
+            # 画面外に出ないようにクリップ
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(0, min(x, sw - w))
+            y = max(0, min(y, sh - h))
+
+            # 1回目：仮配置
             self._rule_manager_dialog.geometry(f"{w}x{h}+{x}+{y}")
+            self._rule_manager_dialog.update_idletasks()
+
+            # 2回目：実際に描画後の「実高さ」で下端を再計算（ここが重要）
+            real_h = self._rule_manager_dialog.winfo_height()
+            y2 = main_bottom - real_h - Y_OFFSET
+            y2 = max(0, min(y2, sh - real_h))
+
+            self._rule_manager_dialog.geometry(f"{w}x{real_h}+{x}+{y2}")
         except Exception:
             pass
 
