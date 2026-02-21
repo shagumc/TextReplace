@@ -229,6 +229,168 @@ class DictStore:
 
 
 # -----------------------------
+# Apply picker popup (multi-select / stays open on click)
+# -----------------------------
+class ApplyPickerPopup(tk.Toplevel):
+    """
+    「使用辞書（適用）」用：MacでもWindowsでも同じ“チェックボックス式”の操作感に寄せるため、
+    tk.Menu を使わず、overrideredirect の小型ポップアップを使用。
+    - ボタン直下に表示
+    - クリックしても閉じない
+    - 外クリックで閉じる
+    """
+    def __init__(
+        self,
+        master: tk.Tk,
+        anchor_widget: tk.Widget,
+        names: List[str],
+        vars_by_name: Dict[str, tk.BooleanVar],
+        on_change: Callable[[], None],
+        on_closed: Callable[[], None],
+    ):
+        super().__init__(master)
+        self.master = master
+        self.anchor_widget = anchor_widget
+        self.names = names
+        self.vars_by_name = vars_by_name
+        self.on_change = on_change
+        self.on_closed = on_closed
+
+        self.overrideredirect(True)
+        try:
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        # macOS: 可能なら “目立ちにくい” ウィンドウスタイルを試す（失敗してもOK）
+        if sys.platform == "darwin":
+            try:
+                # これはTkの内部/非公式API。環境によって存在しないので例外は握り潰す
+                self.tk.call("::tk::unsupported::MacWindowStyle", "style", self._w, "help", "noActivates")
+            except Exception:
+                pass
+
+        # 位置決め
+        self.update_idletasks()
+        x = anchor_widget.winfo_rootx()
+        y = anchor_widget.winfo_rooty() + anchor_widget.winfo_height()
+        self.geometry(f"+{x}+{y}")
+
+        # 外枠（メニューっぽく）
+        outer = ttk.Frame(self, padding=8, relief="solid", borderwidth=1)
+        outer.pack(fill="both", expand=True)
+
+        # 多い場合に備えてスクロール（最大高さを制限）
+        max_h = int(master.winfo_screenheight() * 0.45)
+        list_frame = ttk.Frame(outer)
+        list_frame.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(list_frame, highlightthickness=0, height=1)
+        vsb = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        def _on_inner_configure(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # 高さクリップ
+            try:
+                req = inner.winfo_reqheight() + 4
+                canvas.configure(height=min(req, max_h))
+            except Exception:
+                pass
+
+        def _on_canvas_configure(e):
+            try:
+                canvas.itemconfigure(inner_id, width=e.width)
+            except Exception:
+                pass
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # チェックボックス群（クリックしても閉じない）
+        for name in names:
+            v = vars_by_name[name]
+            cb = ttk.Checkbutton(inner, text=name, variable=v, command=self._changed)
+            cb.pack(anchor="w")
+
+        # 下部ボタン（編集辞書のみ選択 は不要とのことなので削除）
+        sep = ttk.Separator(outer)
+        sep.pack(fill="x", pady=(8, 6))
+
+        btns = ttk.Frame(outer)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="すべて解除", command=self._clear_all).pack(side="left")
+        ttk.Button(btns, text="閉じる", command=self.close).pack(side="right")
+
+        # 外クリックで閉じる
+        self._prev_bind_all = self.master.bind_all("<Button-1>")
+        self.master.bind_all("<Button-1>", self._on_global_click, add="+")
+
+        # ESC で閉じる
+        self.bind("<Escape>", lambda _e: self.close())
+        self.protocol("WM_DELETE_WINDOW", self.close)
+
+        # 初回サイズ調整
+        self.after(1, _on_inner_configure)
+
+    def _changed(self):
+        self.on_change()
+
+    def _clear_all(self):
+        for v in self.vars_by_name.values():
+            try:
+                v.set(False)
+            except Exception:
+                pass
+        self.on_change()
+
+    def _on_global_click(self, event):
+        w = event.widget
+        if self._is_descendant_of(w, self):
+            return
+        if w == self.anchor_widget or self._is_descendant_of(w, self.anchor_widget):
+            # ボタンを押した場合は App 側でトグルさせるので、ここでは閉じる
+            self.close()
+            return
+        self.close()
+
+    @staticmethod
+    def _is_descendant_of(widget, parent) -> bool:
+        try:
+            while widget is not None:
+                if widget == parent:
+                    return True
+                widget = widget.master
+        except Exception:
+            pass
+        return False
+
+    def close(self):
+        try:
+            self.master.unbind_all("<Button-1>")
+            if self._prev_bind_all:
+                self.master.bind_all("<Button-1>", self._prev_bind_all)
+        except Exception:
+            pass
+
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+        try:
+            self.on_closed()
+        except Exception:
+            pass
+
+
+# -----------------------------
 # Line numbers
 # -----------------------------
 class LineNumberCanvas(tk.Canvas):
@@ -602,15 +764,9 @@ class App(tk.Tk):
         names = self.store.names()
         self.edit_dict_name_var = tk.StringVar(value=names[0] if names else "default")
 
-        # 適用辞書（複数）
         self.apply_vars: Dict[str, tk.BooleanVar] = {}
         self.apply_button = None
-        self.apply_menu: Optional[tk.Menu] = None
-
-        # ★「チェックしても閉じない」用
-        self._apply_menu_last_post_xy: Optional[tuple[int, int]] = None
-        self._apply_menu_keep_open = False
-        self._apply_menu_reposting = False
+        self._apply_popup: Optional[ApplyPickerPopup] = None
 
         self.message_var = tk.StringVar(value="")
 
@@ -648,9 +804,8 @@ class App(tk.Tk):
 
         self.apply_button = ttk.Menubutton(row1, text="選択…")
         self.apply_button.pack(side="left", padx=(6, 8))
-
-        # ★「押したらメニューを自前で post」して座標を記録
-        self.apply_button.bind("<Button-1>", self._on_apply_button_click, add="+")
+        # ★ポップアップを開く（クリックしても閉じない）
+        self.apply_button.bind("<Button-1>", self.toggle_apply_picker, add="+")
 
         if self._use_ttk_colored_button:
             self.replace_btn = ttk.Button(
@@ -703,6 +858,7 @@ class App(tk.Tk):
         msg = ttk.Label(top, textvariable=self.message_var, foreground="gray")
         msg.pack(anchor="w", pady=(6, 0))
 
+        # ★メイン操作してもルールダイアログを前面に
         self.bind("<Button-1>", self._on_main_interaction, add="+")
         self.bind("<FocusIn>", self._on_main_interaction, add="+")
 
@@ -789,106 +945,6 @@ class App(tk.Tk):
         scale = p / 100.0
         size = max(8, int(round(self._base_font_size * scale)))
         self._text_font.configure(size=size)
-
-    # -----------------------------
-    # 使用辞書（適用）メニュー：チェックしても閉じない
-    # -----------------------------
-    def _on_apply_button_click(self, event):
-        if self.apply_menu is None:
-            return "break"
-        try:
-            x = self.apply_button.winfo_rootx()
-            y = self.apply_button.winfo_rooty() + self.apply_button.winfo_height()
-            self._apply_menu_last_post_xy = (x, y)
-            self._apply_menu_keep_open = True
-            self._apply_menu_reposting = False
-            self.apply_menu.post(x, y)
-        except Exception:
-            pass
-        return "break"
-
-    def _apply_menu_repost(self):
-        # 連打や再入を抑止
-        if not self._apply_menu_keep_open:
-            return
-        if self._apply_menu_reposting:
-            return
-        if self._apply_menu_last_post_xy is None:
-            return
-        if self.apply_menu is None:
-            return
-
-        self._apply_menu_reposting = True
-
-        def _do():
-            try:
-                # いったん unpost してから同じ場所に出すと安定
-                try:
-                    self.apply_menu.unpost()
-                except Exception:
-                    pass
-                x, y = self._apply_menu_last_post_xy
-                self.apply_menu.post(x, y)
-            finally:
-                self._apply_menu_reposting = False
-
-        # Tk のイベントループに戻してから再表示（メニューが閉じた直後に再表示するため）
-        self.after(1, _do)
-
-    def _apply_menu_close(self):
-        self._apply_menu_keep_open = False
-        try:
-            if self.apply_menu is not None:
-                self.apply_menu.unpost()
-        except Exception:
-            pass
-
-    def _rebuild_apply_menu_widget(self):
-        m = tk.Menu(self, tearoff=False)
-
-        names = self.store.names()
-
-        for name in names:
-            if name not in self.apply_vars:
-                self.apply_vars[name] = tk.BooleanVar(value=False)
-
-            def _toggle(n=name):
-                # チェック変更
-                self.on_apply_selection_change()
-                # ★閉じない体感：同じ位置に再表示
-                self._apply_menu_repost()
-
-            m.add_checkbutton(label=name, variable=self.apply_vars[name], command=_toggle)
-
-        if names:
-            m.add_separator()
-
-        def _clear_all():
-            for v in self.apply_vars.values():
-                try:
-                    v.set(False)
-                except Exception:
-                    pass
-            self.on_apply_selection_change()
-            self._apply_menu_repost()
-
-        def _select_edit_only():
-            ed = self.current_edit_dict_name()
-            for k, v in self.apply_vars.items():
-                try:
-                    v.set(k == ed)
-                except Exception:
-                    pass
-            self.on_apply_selection_change()
-            self._apply_menu_repost()
-
-        m.add_command(label="すべて解除", command=_clear_all)
-        m.add_command(label="編集辞書のみ選択", command=_select_edit_only)
-        m.add_separator()
-        m.add_command(label="閉じる", command=self._apply_menu_close)
-
-        self.apply_menu = m
-        self.apply_button.configure(menu=self.apply_menu)
 
     # --- progress / lock ---
     def _set_edit_lock(self, locked: bool):
@@ -1042,9 +1098,35 @@ class App(tk.Tk):
             self.apply_vars[name] = tk.BooleanVar(value=False)
         if initial_select_edit and edit in self.apply_vars:
             self.apply_vars[edit].set(True)
-
-        self._rebuild_apply_menu_widget()
         self.on_apply_selection_change()
+
+    def toggle_apply_picker(self, event=None):
+        # 既に開いているなら閉じる
+        if self._apply_popup is not None:
+            try:
+                self._apply_popup.close()
+            except Exception:
+                pass
+            self._apply_popup = None
+            return "break"
+
+        names = self.store.names()
+        for n in names:
+            if n not in self.apply_vars:
+                self.apply_vars[n] = tk.BooleanVar(value=False)
+
+        def _closed():
+            self._apply_popup = None
+
+        self._apply_popup = ApplyPickerPopup(
+            master=self,
+            anchor_widget=self.apply_button,
+            names=names,
+            vars_by_name=self.apply_vars,
+            on_change=self.on_apply_selection_change,
+            on_closed=_closed,
+        )
+        return "break"
 
     def selected_apply_dicts(self) -> List[str]:
         names = self.store.names()
@@ -1070,11 +1152,13 @@ class App(tk.Tk):
         if cur not in self.store.dicts:
             self.edit_dict_name_var.set("default")
 
-        self._rebuild_apply_menu_widget()
-        self.on_apply_selection_change()
-
-        if self._rule_manager_dialog is not None and self._rule_manager_dialog.winfo_exists():
-            self._rule_manager_dialog.refresh_dict_names()
+        # 適用ポップアップが開いている時は閉じておく（リスト更新の事故防止）
+        if self._apply_popup is not None:
+            try:
+                self._apply_popup.close()
+            except Exception:
+                pass
+            self._apply_popup = None
 
     def on_edit_dict_change(self, _event=None):
         if not any(v.get() for v in self.apply_vars.values()):
