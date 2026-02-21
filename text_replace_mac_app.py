@@ -70,7 +70,6 @@ class ScrollableFrame(ttk.Frame):
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        # bind_all を常時ではなく「入った時だけ」有効化
         self._wheel_bound = False
         for w in (self.canvas, self.inner):
             w.bind("<Enter>", self._bind_wheel, add="+")
@@ -230,87 +229,6 @@ class DictStore:
 
 
 # -----------------------------
-# Dict picker popup (multi-select, does not close on click)
-# -----------------------------
-class DictPickerPopup(tk.Toplevel):
-    def __init__(self, master, anchor_widget, names, vars_by_name, on_change, on_closed):
-        super().__init__(master)
-
-        self.master = master
-        self.anchor_widget = anchor_widget
-        self.names = names
-        self.vars_by_name = vars_by_name
-        self.on_change = on_change
-        self.on_closed = on_closed
-
-        self.overrideredirect(True)
-        try:
-            self.attributes("-topmost", True)
-        except Exception:
-            pass
-
-        self.update_idletasks()
-        x = anchor_widget.winfo_rootx()
-        y = anchor_widget.winfo_rooty() + anchor_widget.winfo_height()
-        self.geometry(f"+{x}+{y}")
-
-        outer = ttk.Frame(self, padding=8, relief="solid", borderwidth=1)
-        outer.pack(fill="both", expand=True)
-
-        for name in names:
-            v = vars_by_name[name]
-            cb = ttk.Checkbutton(outer, text=name, variable=v, command=self._changed)
-            cb.pack(anchor="w")
-
-        self._prev_bind_all = self.master.bind_all("<Button-1>")
-        self.master.bind_all("<Button-1>", self._on_global_click, add="+")
-
-        self.bind("<Escape>", lambda _e: self.close())
-        self.protocol("WM_DELETE_WINDOW", self.close)
-
-    def _changed(self):
-        self.on_change()
-
-    def _on_global_click(self, event):
-        w = event.widget
-        if self._is_descendant_of(w, self):
-            return
-        if w == self.anchor_widget or self._is_descendant_of(w, self.anchor_widget):
-            self.close()
-            return
-        self.close()
-
-    @staticmethod
-    def _is_descendant_of(widget, parent) -> bool:
-        try:
-            while widget is not None:
-                if widget == parent:
-                    return True
-                widget = widget.master
-        except Exception:
-            pass
-        return False
-
-    def close(self):
-        try:
-            self.master.unbind_all("<Button-1>")
-            if self._prev_bind_all:
-                self.master.bind_all("<Button-1>", self._prev_bind_all)
-        except Exception:
-            pass
-
-        try:
-            self.destroy()
-        except Exception:
-            pass
-
-        try:
-            self.on_closed()
-        except Exception:
-            pass
-
-
-# -----------------------------
 # Line numbers
 # -----------------------------
 class LineNumberCanvas(tk.Canvas):
@@ -358,8 +276,6 @@ class RuleManager(tk.Toplevel):
     ):
         super().__init__(master)
         self.title("辞書（置換ルール）")
-
-        # geometry は App.open_rules() 側で「メインと同じ幅 + 出力に重ねる」設定をする
         self.minsize(520, 320)
 
         self.master = master
@@ -380,7 +296,7 @@ class RuleManager(tk.Toplevel):
         self.rules: List[Rule] = self.store.get_rules(init_name)
 
         try:
-            self.attributes("-topmost", False)
+            self.transient(self.master)
         except Exception:
             pass
 
@@ -434,6 +350,18 @@ class RuleManager(tk.Toplevel):
         self.render_rows()
 
         self.protocol("WM_DELETE_WINDOW", self.close)
+
+    def bring_to_front_no_focus(self):
+        try:
+            self.lift()
+        except Exception:
+            pass
+        try:
+            self.attributes("-topmost", True)
+            self.lift()
+            self.after(10, lambda: self.attributes("-topmost", False))
+        except Exception:
+            pass
 
     def focus_existing(self):
         try:
@@ -605,7 +533,6 @@ class RuleManager(tk.Toplevel):
 
 
 def resource_path(rel: str) -> str:
-    # PyInstaller でも通常実行でも同じ書き方で参照するため
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return str(base / rel)
 
@@ -617,18 +544,15 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        # --- Style: macOS だけ ttk で色を出す（Windows は tk.Button を使う） ---
         self._use_ttk_colored_button = (sys.platform == "darwin")
 
         if self._use_ttk_colored_button:
             self.style = ttk.Style(self)
-            # macOS の Aqua は背景色が効きにくいので clam に切り替え
             try:
                 self.style.theme_use("clam")
             except Exception:
                 pass
 
-            # 置換実行ボタン用スタイル（緑）
             self.style.configure(
                 "Replace.TButton",
                 padding=(10, 4),
@@ -657,14 +581,12 @@ class App(tk.Tk):
 
         self.title(APP_NAME)
 
-        # 画面幅の「約3分の1」に寄せる（デグレなし：見た目だけ）
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
 
-        # 3分の1が小さすぎる環境もあるので、下限/上限で安全にクリップ
-        target_w = int(sw * 0.34)  # だいたい3分の1
-        target_w = max(740, min(980, target_w))  # 下限/上限（UI崩れ防止）
+        target_w = int(sw * 0.34)
+        target_w = max(740, min(980, target_w))
 
         target_h = int(sh * 0.88)
         target_h = max(720, min(920, target_h))
@@ -680,9 +602,15 @@ class App(tk.Tk):
         names = self.store.names()
         self.edit_dict_name_var = tk.StringVar(value=names[0] if names else "default")
 
+        # 適用辞書（複数）
         self.apply_vars: Dict[str, tk.BooleanVar] = {}
         self.apply_button = None
-        self._apply_popup: Optional[DictPickerPopup] = None
+        self.apply_menu: Optional[tk.Menu] = None
+
+        # ★「チェックしても閉じない」用
+        self._apply_menu_last_post_xy: Optional[tuple[int, int]] = None
+        self._apply_menu_keep_open = False
+        self._apply_menu_reposting = False
 
         self.message_var = tk.StringVar(value="")
 
@@ -695,18 +623,17 @@ class App(tk.Tk):
 
         self._in_hl_after_id = None
         self._in_hl_tag = "src_target"
-        self._in_hl_color = "#ffd6e7"  # 薄いピンク
+        self._in_hl_color = "#ffd6e7"
 
         self._last_loaded_text_path: Optional[Path] = None
 
         self._rule_manager_dialog: Optional[RuleManager] = None
 
-        # 置換実行中：プログレス＆編集ロック
         self._replacing = False
         self._progress_win = None
         self._progress_bar = None
 
-        # ---------- TOP MENUS (3 rows) ----------
+        # ---------- TOP MENUS ----------
         top = ttk.Frame(self, padding=(10, 8, 10, 6))
         top.pack(fill="x")
 
@@ -721,11 +648,11 @@ class App(tk.Tk):
 
         self.apply_button = ttk.Menubutton(row1, text="選択…")
         self.apply_button.pack(side="left", padx=(6, 8))
-        self.apply_button.bind("<Button-1>", lambda _e: (self.open_apply_picker(), "break"))
 
-        # --- 置換実行ボタン（OSで出し分け） ---
+        # ★「押したらメニューを自前で post」して座標を記録
+        self.apply_button.bind("<Button-1>", self._on_apply_button_click, add="+")
+
         if self._use_ttk_colored_button:
-            # macOS：ttk + style
             self.replace_btn = ttk.Button(
                 row1,
                 text="置換実行",
@@ -733,7 +660,6 @@ class App(tk.Tk):
                 style="Replace.TButton",
             )
         else:
-            # Windows/Linux：tk.Button の bg が一番確実
             self.replace_btn = tk.Button(
                 row1,
                 text="置換実行",
@@ -777,8 +703,8 @@ class App(tk.Tk):
         msg = ttk.Label(top, textvariable=self.message_var, foreground="gray")
         msg.pack(anchor="w", pady=(6, 0))
 
-        self.bind("<Button-1>", lambda _e: self.lift())
-        self.bind("<FocusIn>", lambda _e: self.lift())
+        self.bind("<Button-1>", self._on_main_interaction, add="+")
+        self.bind("<FocusIn>", self._on_main_interaction, add="+")
 
         self.build_apply_menu(initial_select_edit=True)
 
@@ -792,7 +718,8 @@ class App(tk.Tk):
         paned.add(in_frame, weight=1)
         paned.add(out_frame, weight=1)
 
-        self.input = tk.Text(in_frame, wrap="none", undo=True, font=self._text_font)
+        # ★幅で改行
+        self.input = tk.Text(in_frame, wrap="char", undo=True, font=self._text_font)
         self.input_ln = LineNumberCanvas(in_frame, self.input, width=44, bg="#f3f3f3")
         self.input_ln.pack(side="left", fill="y", padx=(0, 6))
         self.input.pack(side="left", fill="both", expand=True)
@@ -807,7 +734,7 @@ class App(tk.Tk):
         self.input.bind("<ButtonRelease-1>", lambda _e: self.input_ln.schedule_redraw(), add="+")
         self.input.bind("<Configure>", lambda _e: self.input_ln.schedule_redraw(), add="+")
 
-        self.output = tk.Text(out_frame, wrap="none", font=self._text_font)
+        self.output = tk.Text(out_frame, wrap="char", font=self._text_font)
         self.output_ln = LineNumberCanvas(out_frame, self.output, width=44, bg="#f3f3f3")
         self.output_ln.pack(side="left", fill="y", padx=(0, 6))
         self.output.pack(side="left", fill="both", expand=True)
@@ -837,6 +764,13 @@ class App(tk.Tk):
         self.output_ln.redraw()
         self.schedule_input_highlight()
 
+    def _on_main_interaction(self, _event=None):
+        if self._rule_manager_dialog is not None and self._rule_manager_dialog.winfo_exists():
+            try:
+                self.after(1, self._rule_manager_dialog.bring_to_front_no_focus)
+            except Exception:
+                pass
+
     def set_message(self, text: str):
         self.message_var.set(text)
 
@@ -855,6 +789,106 @@ class App(tk.Tk):
         scale = p / 100.0
         size = max(8, int(round(self._base_font_size * scale)))
         self._text_font.configure(size=size)
+
+    # -----------------------------
+    # 使用辞書（適用）メニュー：チェックしても閉じない
+    # -----------------------------
+    def _on_apply_button_click(self, event):
+        if self.apply_menu is None:
+            return "break"
+        try:
+            x = self.apply_button.winfo_rootx()
+            y = self.apply_button.winfo_rooty() + self.apply_button.winfo_height()
+            self._apply_menu_last_post_xy = (x, y)
+            self._apply_menu_keep_open = True
+            self._apply_menu_reposting = False
+            self.apply_menu.post(x, y)
+        except Exception:
+            pass
+        return "break"
+
+    def _apply_menu_repost(self):
+        # 連打や再入を抑止
+        if not self._apply_menu_keep_open:
+            return
+        if self._apply_menu_reposting:
+            return
+        if self._apply_menu_last_post_xy is None:
+            return
+        if self.apply_menu is None:
+            return
+
+        self._apply_menu_reposting = True
+
+        def _do():
+            try:
+                # いったん unpost してから同じ場所に出すと安定
+                try:
+                    self.apply_menu.unpost()
+                except Exception:
+                    pass
+                x, y = self._apply_menu_last_post_xy
+                self.apply_menu.post(x, y)
+            finally:
+                self._apply_menu_reposting = False
+
+        # Tk のイベントループに戻してから再表示（メニューが閉じた直後に再表示するため）
+        self.after(1, _do)
+
+    def _apply_menu_close(self):
+        self._apply_menu_keep_open = False
+        try:
+            if self.apply_menu is not None:
+                self.apply_menu.unpost()
+        except Exception:
+            pass
+
+    def _rebuild_apply_menu_widget(self):
+        m = tk.Menu(self, tearoff=False)
+
+        names = self.store.names()
+
+        for name in names:
+            if name not in self.apply_vars:
+                self.apply_vars[name] = tk.BooleanVar(value=False)
+
+            def _toggle(n=name):
+                # チェック変更
+                self.on_apply_selection_change()
+                # ★閉じない体感：同じ位置に再表示
+                self._apply_menu_repost()
+
+            m.add_checkbutton(label=name, variable=self.apply_vars[name], command=_toggle)
+
+        if names:
+            m.add_separator()
+
+        def _clear_all():
+            for v in self.apply_vars.values():
+                try:
+                    v.set(False)
+                except Exception:
+                    pass
+            self.on_apply_selection_change()
+            self._apply_menu_repost()
+
+        def _select_edit_only():
+            ed = self.current_edit_dict_name()
+            for k, v in self.apply_vars.items():
+                try:
+                    v.set(k == ed)
+                except Exception:
+                    pass
+            self.on_apply_selection_change()
+            self._apply_menu_repost()
+
+        m.add_command(label="すべて解除", command=_clear_all)
+        m.add_command(label="編集辞書のみ選択", command=_select_edit_only)
+        m.add_separator()
+        m.add_command(label="閉じる", command=self._apply_menu_close)
+
+        self.apply_menu = m
+        self.apply_button.configure(menu=self.apply_menu)
 
     # --- progress / lock ---
     def _set_edit_lock(self, locked: bool):
@@ -1008,33 +1042,9 @@ class App(tk.Tk):
             self.apply_vars[name] = tk.BooleanVar(value=False)
         if initial_select_edit and edit in self.apply_vars:
             self.apply_vars[edit].set(True)
+
+        self._rebuild_apply_menu_widget()
         self.on_apply_selection_change()
-
-    def open_apply_picker(self):
-        if self._apply_popup is not None:
-            try:
-                self._apply_popup.close()
-            except Exception:
-                pass
-            self._apply_popup = None
-            return
-
-        names = self.store.names()
-        for n in names:
-            if n not in self.apply_vars:
-                self.apply_vars[n] = tk.BooleanVar(value=False)
-
-        def _closed():
-            self._apply_popup = None
-
-        self._apply_popup = DictPickerPopup(
-            master=self,
-            anchor_widget=self.apply_button,
-            names=names,
-            vars_by_name=self.apply_vars,
-            on_change=self.on_apply_selection_change,
-            on_closed=_closed
-        )
 
     def selected_apply_dicts(self) -> List[str]:
         names = self.store.names()
@@ -1059,6 +1069,9 @@ class App(tk.Tk):
         cur = self.current_edit_dict_name()
         if cur not in self.store.dicts:
             self.edit_dict_name_var.set("default")
+
+        self._rebuild_apply_menu_widget()
+        self.on_apply_selection_change()
 
         if self._rule_manager_dialog is not None and self._rule_manager_dialog.winfo_exists():
             self._rule_manager_dialog.refresh_dict_names()
@@ -1219,7 +1232,6 @@ class App(tk.Tk):
             on_closed=_closed,
         )
 
-        # ★メインと同じ幅、初期表示は「下端をメイン下端に合わせる」（実高さで2段階補正）
         try:
             self.update_idletasks()
             self._rule_manager_dialog.update_idletasks()
@@ -1230,7 +1242,6 @@ class App(tk.Tk):
             main_h = self.winfo_height()
             main_bottom = main_y + main_h
 
-            # まずは希望サイズ（出力枠の高さをベース）
             out_h = self.output.winfo_height()
 
             req_w = self._rule_manager_dialog.winfo_reqwidth()
@@ -1241,19 +1252,16 @@ class App(tk.Tk):
             h = max(320, out_h, req_h)
 
             x = main_x
-            y = main_bottom - h - Y_OFFSET# 下端合わせ（仮）
+            y = main_bottom - h - Y_OFFSET
 
-            # 画面外に出ないようにクリップ
             sw = self.winfo_screenwidth()
             sh = self.winfo_screenheight()
             x = max(0, min(x, sw - w))
             y = max(0, min(y, sh - h))
 
-            # 1回目：仮配置
             self._rule_manager_dialog.geometry(f"{w}x{h}+{x}+{y}")
             self._rule_manager_dialog.update_idletasks()
 
-            # 2回目：実際に描画後の「実高さ」で下端を再計算（ここが重要）
             real_h = self._rule_manager_dialog.winfo_height()
             y2 = main_bottom - real_h - Y_OFFSET
             y2 = max(0, min(y2, sh - real_h))
@@ -1262,7 +1270,10 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        self._rule_manager_dialog.focus_existing()
+        try:
+            self._rule_manager_dialog.bring_to_front_no_focus()
+        except Exception:
+            pass
 
     # --- replace with progress + lock ---
     def replace(self):
@@ -1275,11 +1286,8 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # 入力/出力の編集を止める
         self._set_edit_lock(True)
-
         self._show_progress("置換中...")
-
         self.after(10, self._do_replace_impl)
 
     def _do_replace_impl(self):
@@ -1299,7 +1307,6 @@ class App(tk.Tk):
             for r in enabled_rules:
                 out = out.replace(r.src, r.dst)
 
-            # output は disabled 中なので一時的に normal にして書き換える
             self.output.config(state="normal")
             self.output.delete("1.0", "end")
             self.output.insert("1.0", out)
@@ -1322,8 +1329,6 @@ class App(tk.Tk):
                 self.replace_btn.config(state="normal")
             except Exception:
                 pass
-
-            # 入力/出力の編集ロック解除
             self._set_edit_lock(False)
 
     # --- output actions ---
