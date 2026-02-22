@@ -560,6 +560,57 @@ class RuleManager(tk.Toplevel):
         # ★macトラックパッドでも「どこでも」スクロールできるように（辞書ダイアログ配下へ直接bind）
         self._install_wheel_bind_recursive_widgets()
 
+    def _on_rules_touchpad(self, event):
+        """
+        ★Tk 8.7+ などでトラックパッド2本指が <TouchpadScroll> になる環境用
+        event.delta (%D) は「dx,dy を詰めた値」になるので、tk::PreciseScrollDeltas があればそれで解凍。
+        """
+        try:
+            if not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
+                return "break"
+        except Exception:
+            return "break"
+    
+        d = getattr(event, "delta", 0)
+        if d == 0:
+            return "break"
+    
+        dx = 0
+        dy = 0
+    
+        # Tk 8.7 の TIP 684: tk::PreciseScrollDeltas がある場合に dx,dy を取る
+        try:
+            # 戻り値は文字列のリストになる（例: "0 -3"）
+            parts = self.tk.call("tk::PreciseScrollDeltas", d)
+            # tk.call の戻りは tuple になる場合もあるので両対応
+            if isinstance(parts, (tuple, list)) and len(parts) >= 2:
+                dx = int(parts[0])
+                dy = int(parts[1])
+            else:
+                s = str(parts)
+                sp = s.split()
+                if len(sp) >= 2:
+                    dx = int(float(sp[0]))
+                    dy = int(float(sp[1]))
+        except Exception:
+            # PreciseScrollDeltas が無い環境では dy 相当として雑に扱う
+            dy = int(d)
+    
+        # dy が下方向なら +、上方向なら - にしたいので符号を調整
+        # Canvas の yview_scroll は「+で下へ」なので dy の符号を反転
+        units = 0
+        if dy != 0:
+            # 高頻度イベント対策：dyが小さいときは1行に丸める
+            units = 1 if dy > 0 else -1
+    
+        if units != 0:
+            try:
+                self.sf.canvas.yview_scroll(units, "units")
+            except Exception:
+                pass
+    
+        return "break"
+
     # -----------------------------
     # ★ macトラックパッドでも「どこでも」スクロール（辞書ダイアログ専用）
     # -----------------------------
@@ -612,6 +663,7 @@ class RuleManager(tk.Toplevel):
         try:
             self.bind_class(self.WHEEL_TAG, "<MouseWheel>", self._on_rules_wheel)
             self.bind_class(self.WHEEL_TAG, "<Shift-MouseWheel>", self._on_rules_wheel)  # 念のため
+            self.bind_class(self.WHEEL_TAG, "<TouchpadScroll>", self._on_rules_touchpad)
             self.bind_class(self.WHEEL_TAG, "<Button-4>", self._on_rules_wheel_linux)
             self.bind_class(self.WHEEL_TAG, "<Button-5>", self._on_rules_wheel_linux)
         except Exception:
