@@ -12,6 +12,7 @@ APP_NAME = "Text Replace"
 
 OLD_RULES_FILE = Path.home() / ".text_replace_rules.json"
 DICT_STORE_FILE = Path.home() / ".text_replace_dictionaries.json"
+SETTINGS_FILE = Path.home() / ".text_replace_settings.json"
 
 
 @dataclass
@@ -51,7 +52,7 @@ class Tooltip:
 # Scrollable Frame (for rules) - safe wheel binding
 # -----------------------------
 class ScrollableFrame(ttk.Frame):
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, enable_wheel_bind: bool = True, **kwargs):
         super().__init__(master, **kwargs)
 
         self.canvas = tk.Canvas(self, highlightthickness=0)
@@ -70,10 +71,14 @@ class ScrollableFrame(ttk.Frame):
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
+        self._enable_wheel_bind = enable_wheel_bind
+
+        # bind_all を常時ではなく「入った時だけ」有効化（必要な場合のみ）
         self._wheel_bound = False
-        for w in (self.canvas, self.inner):
-            w.bind("<Enter>", self._bind_wheel, add="+")
-            w.bind("<Leave>", self._unbind_wheel, add="+")
+        if self._enable_wheel_bind:
+            for w in (self.canvas, self.inner):
+                w.bind("<Enter>", self._bind_wheel, add="+")
+                w.bind("<Leave>", self._unbind_wheel, add="+")
 
     def _on_inner_configure(self, _event):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -82,6 +87,8 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.itemconfigure(self.inner_id, width=event.width)
 
     def _bind_wheel(self, _event=None):
+        if not self._enable_wheel_bind:
+            return
         if self._wheel_bound:
             return
         self._wheel_bound = True
@@ -90,6 +97,8 @@ class ScrollableFrame(ttk.Frame):
         self.bind_all("<Button-5>", self._on_mousewheel_linux, add="+")
 
     def _unbind_wheel(self, _event=None):
+        if not self._enable_wheel_bind:
+            return
         if not self._wheel_bound:
             return
         self._wheel_bound = False
@@ -101,23 +110,23 @@ class ScrollableFrame(ttk.Frame):
             pass
 
     def _on_mousewheel(self, event):
+        # macOS のトラックパッド等で delta が小さく (delta/120)==0 になる対策
         try:
-            if not self.winfo_exists():
-                return
-            if not self.canvas.winfo_exists():
+            if not self.winfo_exists() or not self.canvas.winfo_exists():
                 return
             delta = getattr(event, "delta", 0)
             if delta == 0:
                 return
-            self.canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+            units = int(-1 * (delta / 120))
+            if units == 0:
+                units = -1 if delta > 0 else 1
+            self.canvas.yview_scroll(units, "units")
         except tk.TclError:
             return
 
     def _on_mousewheel_linux(self, event):
         try:
-            if not self.winfo_exists():
-                return
-            if not self.canvas.winfo_exists():
+            if not self.winfo_exists() or not self.canvas.winfo_exists():
                 return
             if event.num == 4:
                 self.canvas.yview_scroll(-1, "units")
@@ -232,13 +241,6 @@ class DictStore:
 # Apply picker popup (multi-select / stays open on click)
 # -----------------------------
 class ApplyPickerPopup(tk.Toplevel):
-    """
-    「使用辞書（適用）」用：MacでもWindowsでも同じ“チェックボックス式”の操作感に寄せるため、
-    tk.Menu を使わず、overrideredirect の小型ポップアップを使用。
-    - ボタン直下に表示
-    - クリックしても閉じない
-    - 外クリックで閉じる
-    """
     def __init__(
         self,
         master: tk.Tk,
@@ -262,25 +264,20 @@ class ApplyPickerPopup(tk.Toplevel):
         except Exception:
             pass
 
-        # macOS: 可能なら “目立ちにくい” ウィンドウスタイルを試す（失敗してもOK）
         if sys.platform == "darwin":
             try:
-                # これはTkの内部/非公式API。環境によって存在しないので例外は握り潰す
                 self.tk.call("::tk::unsupported::MacWindowStyle", "style", self._w, "help", "noActivates")
             except Exception:
                 pass
 
-        # 位置決め
         self.update_idletasks()
         x = anchor_widget.winfo_rootx()
         y = anchor_widget.winfo_rooty() + anchor_widget.winfo_height()
         self.geometry(f"+{x}+{y}")
 
-        # 外枠（メニューっぽく）
         outer = ttk.Frame(self, padding=8, relief="solid", borderwidth=1)
         outer.pack(fill="both", expand=True)
 
-        # 多い場合に備えてスクロール（最大高さを制限）
         max_h = int(master.winfo_screenheight() * 0.45)
         list_frame = ttk.Frame(outer)
         list_frame.pack(fill="both", expand=True)
@@ -297,7 +294,6 @@ class ApplyPickerPopup(tk.Toplevel):
 
         def _on_inner_configure(_e=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
-            # 高さクリップ
             try:
                 req = inner.winfo_reqheight() + 4
                 canvas.configure(height=min(req, max_h))
@@ -313,13 +309,60 @@ class ApplyPickerPopup(tk.Toplevel):
         inner.bind("<Configure>", _on_inner_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        # チェックボックス群（クリックしても閉じない）
+        # ホイールスクロール対応（トラックパッドも）
+        self._wheel_bound = False
+
+        def _on_wheel(event):
+            try:
+                delta = getattr(event, "delta", 0)
+                if delta == 0:
+                    return "break"
+                units = int(-1 * (delta / 120))
+                if units == 0:
+                    units = -1 if delta > 0 else 1
+                canvas.yview_scroll(units, "units")
+            except Exception:
+                pass
+            return "break"
+
+        def _on_wheel_linux(event):
+            try:
+                if event.num == 4:
+                    canvas.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    canvas.yview_scroll(1, "units")
+            except Exception:
+                pass
+            return "break"
+
+        def _bind_wheel(_e=None):
+            if self._wheel_bound:
+                return
+            self._wheel_bound = True
+            self.bind_all("<MouseWheel>", _on_wheel, add="+")
+            self.bind_all("<Button-4>", _on_wheel_linux, add="+")
+            self.bind_all("<Button-5>", _on_wheel_linux, add="+")
+
+        def _unbind_wheel(_e=None):
+            if not self._wheel_bound:
+                return
+            self._wheel_bound = False
+            try:
+                self.unbind_all("<MouseWheel>")
+                self.unbind_all("<Button-4>")
+                self.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        for w in (canvas, inner, list_frame, outer):
+            w.bind("<Enter>", _bind_wheel, add="+")
+            w.bind("<Leave>", _unbind_wheel, add="+")
+
         for name in names:
             v = vars_by_name[name]
             cb = ttk.Checkbutton(inner, text=name, variable=v, command=self._changed)
             cb.pack(anchor="w")
 
-        # 下部ボタン（編集辞書のみ選択 は不要とのことなので削除）
         sep = ttk.Separator(outer)
         sep.pack(fill="x", pady=(8, 6))
 
@@ -328,15 +371,12 @@ class ApplyPickerPopup(tk.Toplevel):
         ttk.Button(btns, text="すべて解除", command=self._clear_all).pack(side="left")
         ttk.Button(btns, text="閉じる", command=self.close).pack(side="right")
 
-        # 外クリックで閉じる
         self._prev_bind_all = self.master.bind_all("<Button-1>")
         self.master.bind_all("<Button-1>", self._on_global_click, add="+")
 
-        # ESC で閉じる
         self.bind("<Escape>", lambda _e: self.close())
         self.protocol("WM_DELETE_WINDOW", self.close)
 
-        # 初回サイズ調整
         self.after(1, _on_inner_configure)
 
     def _changed(self):
@@ -355,7 +395,6 @@ class ApplyPickerPopup(tk.Toplevel):
         if self._is_descendant_of(w, self):
             return
         if w == self.anchor_widget or self._is_descendant_of(w, self.anchor_widget):
-            # ボタンを押した場合は App 側でトグルさせるので、ここでは閉じる
             self.close()
             return
         self.close()
@@ -450,6 +489,9 @@ class RuleManager(tk.Toplevel):
         self._save_after_id = None
         self._switching = False
 
+        # ★このダイアログ内は「どこにカーソルがあっても」スクロールできるようにする
+        self._wheel_bound = False
+
         init_name = (initial_dict_name or "default").strip() or "default"
         if init_name not in self.store.dicts:
             init_name = "default"
@@ -493,7 +535,8 @@ class RuleManager(tk.Toplevel):
         ttk.Label(header, text="置換後").grid(row=0, column=3, sticky="w", padx=(10, 0))
         ttk.Label(header, text="操作", width=16).grid(row=0, column=4, sticky="e")
 
-        self.sf = ScrollableFrame(outer)
+        # ★RuleManager 内では ScrollableFrame 側の wheel bind は無効化（ここでまとめて制御する）
+        self.sf = ScrollableFrame(outer, enable_wheel_bind=False)
         self.sf.grid(row=2, column=0, sticky="nsew")
 
         footer = ttk.Frame(outer)
@@ -512,6 +555,61 @@ class RuleManager(tk.Toplevel):
         self.render_rows()
 
         self.protocol("WM_DELETE_WINDOW", self.close)
+
+        # ★このウィンドウに入ったら wheel を有効化（どの場所でもスクロール）
+        self.bind("<Enter>", self._bind_wheel_all, add="+")
+        self.bind("<Leave>", self._unbind_wheel_all, add="+")
+        outer.bind("<Enter>", self._bind_wheel_all, add="+")
+        outer.bind("<Leave>", self._unbind_wheel_all, add="+")
+
+    def _bind_wheel_all(self, _event=None):
+        if self._wheel_bound:
+            return
+        self._wheel_bound = True
+        self.bind_all("<MouseWheel>", self._on_wheel_anywhere, add="+")
+        self.bind_all("<Button-4>", self._on_wheel_linux_anywhere, add="+")
+        self.bind_all("<Button-5>", self._on_wheel_linux_anywhere, add="+")
+
+    def _unbind_wheel_all(self, _event=None):
+        if not self._wheel_bound:
+            return
+        self._wheel_bound = False
+        try:
+            self.unbind_all("<MouseWheel>")
+            self.unbind_all("<Button-4>")
+            self.unbind_all("<Button-5>")
+        except Exception:
+            pass
+
+    def _on_wheel_anywhere(self, event):
+        try:
+            if not self.winfo_exists() or not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
+                return "break"
+
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                return "break"
+
+            units = int(-1 * (delta / 120))
+            if units == 0:
+                units = -1 if delta > 0 else 1
+
+            self.sf.canvas.yview_scroll(units, "units")
+        except Exception:
+            pass
+        return "break"
+
+    def _on_wheel_linux_anywhere(self, event):
+        try:
+            if not self.winfo_exists() or not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
+                return "break"
+            if event.num == 4:
+                self.sf.canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.sf.canvas.yview_scroll(1, "units")
+        except Exception:
+            pass
+        return "break"
 
     def bring_to_front_no_focus(self):
         try:
@@ -570,6 +668,10 @@ class RuleManager(tk.Toplevel):
 
     def close(self):
         self.perform_save()
+        try:
+            self._unbind_wheel_all()
+        except Exception:
+            pass
         try:
             self.destroy()
         finally:
@@ -743,6 +845,10 @@ class App(tk.Tk):
 
         self.title(APP_NAME)
 
+        # ★設定の読み込み（最後の保存フォルダなど）
+        self._last_save_dir: Optional[Path] = None
+        self._load_settings()
+
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
@@ -782,12 +888,15 @@ class App(tk.Tk):
         self._in_hl_color = "#ffd6e7"
 
         self._last_loaded_text_path: Optional[Path] = None
-
         self._rule_manager_dialog: Optional[RuleManager] = None
 
         self._replacing = False
         self._progress_win = None
         self._progress_bar = None
+
+        # ★スクロール位置（%）表示
+        self.in_scroll_pct_var = tk.StringVar(value="0%")
+        self.out_scroll_pct_var = tk.StringVar(value="0%")
 
         # ---------- TOP MENUS ----------
         top = ttk.Frame(self, padding=(10, 8, 10, 6))
@@ -804,7 +913,6 @@ class App(tk.Tk):
 
         self.apply_button = ttk.Menubutton(row1, text="選択…")
         self.apply_button.pack(side="left", padx=(6, 8))
-        # ★ポップアップを開く（クリックしても閉じない）
         self.apply_button.bind("<Button-1>", self.toggle_apply_picker, add="+")
 
         if self._use_ttk_colored_button:
@@ -858,7 +966,6 @@ class App(tk.Tk):
         msg = ttk.Label(top, textvariable=self.message_var, foreground="gray")
         msg.pack(anchor="w", pady=(6, 0))
 
-        # ★メイン操作してもルールダイアログを前面に
         self.bind("<Button-1>", self._on_main_interaction, add="+")
         self.bind("<FocusIn>", self._on_main_interaction, add="+")
 
@@ -874,17 +981,32 @@ class App(tk.Tk):
         paned.add(in_frame, weight=1)
         paned.add(out_frame, weight=1)
 
-        # ★幅で改行
         self.input = tk.Text(in_frame, wrap="char", undo=True, font=self._text_font)
         self.input_ln = LineNumberCanvas(in_frame, self.input, width=44, bg="#f3f3f3")
         self.input_ln.pack(side="left", fill="y", padx=(0, 6))
         self.input.pack(side="left", fill="both", expand=True)
 
-        self.in_vsb = ttk.Scrollbar(in_frame, orient="vertical", command=lambda *a: self._scroll_both(*a))
+        # ★入力にも右側スクロールバー（太く）
+        self.in_vsb = tk.Scrollbar(in_frame, orient="vertical", command=lambda *a: self._scroll_both(*a), width=16)
         self.in_vsb.pack(side="right", fill="y")
         self.input.configure(yscrollcommand=self._on_input_yscroll)
 
-        self.input.tag_configure(self._in_hl_tag, background=self._in_hl_color)
+        # ★スクロール位置%（入力）
+        self.in_pct_label = tk.Label(
+            in_frame,
+            textvariable=self.in_scroll_pct_var,
+            font=("TkDefaultFont", 9),
+            bg="#f3f3f3",
+            fg="#333333",
+            padx=6,
+            pady=2,
+            bd=1,
+            relief="solid",
+        )
+        # 右上に固定表示（スクロールバーの上あたり）
+        self.in_pct_label.place(relx=1.0, x=-4, y=2, anchor="ne")
+
+        self.input.tag_configure("src_target", background=self._in_hl_color)
 
         self.input.bind("<KeyRelease>", lambda _e: self.schedule_input_highlight(), add="+")
         self.input.bind("<ButtonRelease-1>", lambda _e: self.input_ln.schedule_redraw(), add="+")
@@ -895,9 +1017,24 @@ class App(tk.Tk):
         self.output_ln.pack(side="left", fill="y", padx=(0, 6))
         self.output.pack(side="left", fill="both", expand=True)
 
-        self.out_vsb = ttk.Scrollbar(out_frame, orient="vertical", command=lambda *a: self._scroll_both(*a))
+        # ★出力の右側スクロールバー（太く）
+        self.out_vsb = tk.Scrollbar(out_frame, orient="vertical", command=lambda *a: self._scroll_both(*a), width=16)
         self.out_vsb.pack(side="right", fill="y")
         self.output.configure(yscrollcommand=self._on_output_yscroll)
+
+        # ★スクロール位置%（出力）
+        self.out_pct_label = tk.Label(
+            out_frame,
+            textvariable=self.out_scroll_pct_var,
+            font=("TkDefaultFont", 9),
+            bg="#f3f3f3",
+            fg="#333333",
+            padx=6,
+            pady=2,
+            bd=1,
+            relief="solid",
+        )
+        self.out_pct_label.place(relx=1.0, x=-4, y=2, anchor="ne")
 
         self.output.bind("<Motion>", self.on_hover)
         self.output.bind("<Leave>", lambda _e: self.tooltip.hide())
@@ -919,6 +1056,51 @@ class App(tk.Tk):
         self.input_ln.redraw()
         self.output_ln.redraw()
         self.schedule_input_highlight()
+
+        # ★初期%表示更新
+        self._update_scroll_pct_from_yview(self.input.yview(), which="in")
+        self._update_scroll_pct_from_yview(self.output.yview(), which="out")
+
+        # ★アプリ終了ハンドリング（設定保存）
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # -----------------------------
+    # Settings (persist)
+    # -----------------------------
+    def _load_settings(self):
+        try:
+            if not SETTINGS_FILE.exists():
+                return
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            last_dir = data.get("last_save_dir")
+            if last_dir:
+                p = Path(str(last_dir))
+                if p.exists() and p.is_dir():
+                    self._last_save_dir = p
+        except Exception:
+            pass
+
+    def _save_settings(self):
+        try:
+            payload = {
+                "version": 1,
+                "last_save_dir": str(self._last_save_dir) if self._last_save_dir else "",
+            }
+            SETTINGS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def on_close(self):
+        try:
+            if self._rule_manager_dialog is not None and self._rule_manager_dialog.winfo_exists():
+                self._rule_manager_dialog.close()
+        except Exception:
+            pass
+        self._save_settings()
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _on_main_interaction(self, _event=None):
         if self._rule_manager_dialog is not None and self._rule_manager_dialog.winfo_exists():
@@ -1015,6 +1197,25 @@ class App(tk.Tk):
             pass
         self._progress_win = None
 
+    # -----------------------------
+    # Scroll % helper
+    # -----------------------------
+    def _update_scroll_pct_from_yview(self, yview_tuple, which: str):
+        """
+        yview() は (first, last) を 0..1 で返す
+        ここでは first を % として表示（例：0.25 -> 25%）
+        """
+        try:
+            first = float(yview_tuple[0])
+        except Exception:
+            first = 0.0
+        pct = int(round(first * 100))
+        pct = max(0, min(100, pct))
+        if which == "in":
+            self.in_scroll_pct_var.set(f"{pct}%")
+        else:
+            self.out_scroll_pct_var.set(f"{pct}%")
+
     # --- sync scroll ---
     def _scroll_both(self, *args):
         if self._syncing:
@@ -1025,11 +1226,22 @@ class App(tk.Tk):
             self.output.yview(*args)
             self.input_ln.schedule_redraw()
             self.output_ln.schedule_redraw()
+
+            # ★%更新
+            self._update_scroll_pct_from_yview(self.input.yview(), which="in")
+            self._update_scroll_pct_from_yview(self.output.yview(), which="out")
         finally:
             self._syncing = False
 
     def _on_input_yscroll(self, first, last):
         self.in_vsb.set(first, last)
+
+        # ★%更新（入力側）
+        try:
+            self._update_scroll_pct_from_yview((first, last), which="in")
+        except Exception:
+            pass
+
         if self._syncing:
             self.input_ln.schedule_redraw()
             return
@@ -1039,11 +1251,21 @@ class App(tk.Tk):
             self.out_vsb.set(first, last)
             self.input_ln.schedule_redraw()
             self.output_ln.schedule_redraw()
+
+            # ★%更新（出力側も合わせる）
+            self._update_scroll_pct_from_yview(self.output.yview(), which="out")
         finally:
             self._syncing = False
 
     def _on_output_yscroll(self, first, last):
         self.out_vsb.set(first, last)
+
+        # ★%更新（出力側）
+        try:
+            self._update_scroll_pct_from_yview((first, last), which="out")
+        except Exception:
+            pass
+
         if self._syncing:
             self.output_ln.schedule_redraw()
             return
@@ -1053,6 +1275,9 @@ class App(tk.Tk):
             self.in_vsb.set(first, last)
             self.input_ln.schedule_redraw()
             self.output_ln.schedule_redraw()
+
+            # ★%更新（入力側も合わせる）
+            self._update_scroll_pct_from_yview(self.input.yview(), which="in")
         finally:
             self._syncing = False
 
@@ -1071,6 +1296,10 @@ class App(tk.Tk):
             self.output.yview_scroll(units, "units")
             self.input_ln.schedule_redraw()
             self.output_ln.schedule_redraw()
+
+            # ★%更新
+            self._update_scroll_pct_from_yview(self.input.yview(), which="in")
+            self._update_scroll_pct_from_yview(self.output.yview(), which="out")
         finally:
             self._syncing = False
         return "break"
@@ -1082,6 +1311,10 @@ class App(tk.Tk):
             self.output.yview_scroll(direction, "units")
             self.input_ln.schedule_redraw()
             self.output_ln.schedule_redraw()
+
+            # ★%更新
+            self._update_scroll_pct_from_yview(self.input.yview(), which="in")
+            self._update_scroll_pct_from_yview(self.output.yview(), which="out")
         finally:
             self._syncing = False
         return "break"
@@ -1101,7 +1334,6 @@ class App(tk.Tk):
         self.on_apply_selection_change()
 
     def toggle_apply_picker(self, event=None):
-        # 既に開いているなら閉じる
         if self._apply_popup is not None:
             try:
                 self._apply_popup.close()
@@ -1146,20 +1378,6 @@ class App(tk.Tk):
             self.apply_button.config(text=f"{len(selected)}個選択")
         self.schedule_input_highlight()
 
-    def refresh_edit_combo(self):
-        self.edit_combo["values"] = self.store.names()
-        cur = self.current_edit_dict_name()
-        if cur not in self.store.dicts:
-            self.edit_dict_name_var.set("default")
-
-        # 適用ポップアップが開いている時は閉じておく（リスト更新の事故防止）
-        if self._apply_popup is not None:
-            try:
-                self._apply_popup.close()
-            except Exception:
-                pass
-            self._apply_popup = None
-
     def on_edit_dict_change(self, _event=None):
         if not any(v.get() for v in self.apply_vars.values()):
             ed = self.current_edit_dict_name()
@@ -1185,7 +1403,7 @@ class App(tk.Tk):
             messagebox.showwarning("作成できません", "その辞書名は既に存在するか、無効な名前です。", parent=self)
             return
         self.store.save()
-        self.refresh_edit_combo()
+        self.edit_combo["values"] = self.store.names()
         self.edit_dict_name_var.set(name)
         self.build_apply_menu(initial_select_edit=True)
         self.set_message(f"辞書を作成しました: {name}")
@@ -1203,7 +1421,7 @@ class App(tk.Tk):
             messagebox.showwarning("削除できません", "削除に失敗しました。", parent=self)
             return
         self.store.save()
-        self.refresh_edit_combo()
+        self.edit_combo["values"] = self.store.names()
         self.edit_dict_name_var.set("default")
         self.build_apply_menu(initial_select_edit=True)
         self.set_message(f"辞書を削除しました: {name}")
@@ -1221,7 +1439,7 @@ class App(tk.Tk):
     def refresh_input_highlight(self):
         self._in_hl_after_id = None
         try:
-            self.input.tag_remove(self._in_hl_tag, "1.0", "end")
+            self.input.tag_remove("src_target", "1.0", "end")
         except Exception:
             pass
 
@@ -1252,7 +1470,7 @@ class App(tk.Tk):
                 if not pos:
                     break
                 end = f"{pos}+{len(needle)}c"
-                self.input.tag_add(self._in_hl_tag, pos, end)
+                self.input.tag_add("src_target", pos, end)
                 start = end
 
         self.input_ln.schedule_redraw()
@@ -1288,11 +1506,10 @@ class App(tk.Tk):
         self.output_ln.redraw()
         self.schedule_input_highlight()
 
-    # --- persistence ---
+    # --- rules dialog (singleton) ---
     def save_rules(self):
         self.store.save()
 
-    # --- rules dialog (singleton) ---
     def open_rules(self):
         if self._rule_manager_dialog is not None and self._rule_manager_dialog.winfo_exists():
             self._rule_manager_dialog.focus_existing()
@@ -1427,10 +1644,14 @@ class App(tk.Tk):
 
         initialdir = None
         initialfile = None
+
+        if self._last_save_dir and self._last_save_dir.exists():
+            initialdir = str(self._last_save_dir)
+        elif self._last_loaded_text_path and self._last_loaded_text_path.exists():
+            initialdir = str(self._last_loaded_text_path.parent)
+
         if self._last_loaded_text_path and self._last_loaded_text_path.exists():
-            src = self._last_loaded_text_path
-            initialdir = str(src.parent)
-            stem = src.stem
+            stem = self._last_loaded_text_path.stem
             initialfile = f"{stem}（TXT変換後）.txt"
 
         path = filedialog.asksaveasfilename(
@@ -1442,8 +1663,16 @@ class App(tk.Tk):
         )
         if not path:
             return
-        Path(path).write_text(text, encoding="utf-8")
-        self.set_message(f"保存しました: {Path(path).name}")
+        p = Path(path)
+        p.write_text(text, encoding="utf-8")
+
+        try:
+            self._last_save_dir = p.parent
+            self._save_settings()
+        except Exception:
+            pass
+
+        self.set_message(f"保存しました: {p.name}")
 
     # --- output highlight / hover ---
     def clear_highlight(self):
