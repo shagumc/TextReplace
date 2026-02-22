@@ -1497,6 +1497,15 @@ class App(tk.Tk):
         self.input.delete("1.0", "end")
         self.input.insert("1.0", content)
 
+        try:
+            self.update_idletasks()            # geometry/layout を確定
+            self.input.update_idletasks()      # Text内部の表示計算を確定
+            self.input.yview_moveto(0.0)       # 先頭に合わせる（任意：不要なら消してOK）
+            first, last = self.input.yview()   # 現在の表示割合を取得
+            self._on_input_yscroll(first, last)  # スクロールバーへ反映
+        except Exception:
+            pass
+
         # OUTをクリア
         self.output.config(state="normal")
         self.output.delete("1.0", "end")
