@@ -601,7 +601,7 @@ class RuleManager(tk.Toplevel):
         units = 0
         if dy != 0:
             # 高頻度イベント対策：dyが小さいときは1行に丸める
-            units = 1 if dy > 0 else -1
+            units = -1 if dy > 0 else 1
     
         if units != 0:
             try:
@@ -1496,6 +1496,11 @@ class App(tk.Tk):
 
         self.input.delete("1.0", "end")
         self.input.insert("1.0", content)
+
+        # OUTをクリア
+        self.output.config(state="normal")
+        self.output.delete("1.0", "end")
+        self.output.config(state="normal")  # ← disabledにしていないのでnormalのままでOK
 
         self._last_loaded_text_path = p
 
