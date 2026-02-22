@@ -601,22 +601,35 @@ class RuleManager(tk.Toplevel):
             pass
         return "break"
 
+    WHEEL_TAG = "RuleManagerWheelTag"
+
     def _install_wheel_bind_recursive_widgets(self):
         """
-        ★辞書ダイアログ配下の “全ウィジェット” に直接 bind する。
-        これが mac の取りこぼし（Entry上でスクロールしない等）に一番強い。
+        ★macトラックパッド対策：
+        ttk/tk標準のMouseWheel処理に“勝つ”ため、bindtags先頭に自前タグを入れて最優先で奪う。
         """
+        # タグ(=bindtag)に対するクラスバインド（最優先で呼ばれたら break する）
+        try:
+            self.bind_class(self.WHEEL_TAG, "<MouseWheel>", self._on_rules_wheel)
+            self.bind_class(self.WHEEL_TAG, "<Shift-MouseWheel>", self._on_rules_wheel)  # 念のため
+            self.bind_class(self.WHEEL_TAG, "<Button-4>", self._on_rules_wheel_linux)
+            self.bind_class(self.WHEEL_TAG, "<Button-5>", self._on_rules_wheel_linux)
+        except Exception:
+            pass
+    
         def _apply(w: tk.Widget):
             try:
-                w.bind("<MouseWheel>", self._on_rules_wheel, add="+")
-                w.bind("<Button-4>", self._on_rules_wheel_linux, add="+")
-                w.bind("<Button-5>", self._on_rules_wheel_linux, add="+")
+                tags = list(w.bindtags())
+                if self.WHEEL_TAG not in tags:
+                    # ★先頭に入れる（標準クラスバインドより前に発火させる）
+                    tags.insert(0, self.WHEEL_TAG)
+                    w.bindtags(tuple(tags))
             except Exception:
                 pass
-
+    
             for c in w.winfo_children():
                 _apply(c)
-
+    
         _apply(self)
 
     # ---- front control ----
