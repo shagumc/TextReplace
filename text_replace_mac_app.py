@@ -495,6 +495,8 @@ class RuleManager(tk.Toplevel):
         self._save_after_id = None
         self._switching = False
 
+        self._wheel_accum = 0  # ★トラックパッド用（delta蓄積）
+
         init_name = (initial_dict_name or "default").strip() or "default"
         if init_name not in self.store.dicts:
             init_name = "default"
@@ -578,22 +580,37 @@ class RuleManager(tk.Toplevel):
                 return "break"
         except Exception:
             return "break"
-
+    
         delta = getattr(event, "delta", 0)
-
-        # mac対策（deltaが小さい場合あり）
         if delta == 0:
             return "break"
-
-        units = int(-delta / 120)
+    
+        # ★トラックパッドは delta が小さい（例: -1, -3, -10...）
+        #   120換算で蓄積し、一定量で1行スクロールする
+        self._wheel_accum += delta
+    
+        threshold = 120  # ホイール1ノッチ相当
+        units = 0
+    
+        # たまった分だけスクロール（複数行もOK）
+        while self._wheel_accum >= threshold:
+            units -= 1
+            self._wheel_accum -= threshold
+    
+        while self._wheel_accum <= -threshold:
+            units += 1
+            self._wheel_accum += threshold
+    
+        # deltaが小さすぎて閾値に届かない場合でも「とりあえず1行」動かす（体感改善）
         if units == 0:
             units = -1 if delta > 0 else 1
-
+            self._wheel_accum = 0  # 小さいdeltaの残りは捨てて暴走防止
+    
         try:
             self.sf.canvas.yview_scroll(units, "units")
         except Exception:
             pass
-
+    
         return "break"
 
     def _on_rules_wheel_linux(self, event):
