@@ -49,12 +49,13 @@ class Tooltip:
 
 
 # -----------------------------
-# Scrollable Frame (for rules) - safe wheel binding
+# Scrollable Frame (for rules)
 # -----------------------------
 class ScrollableFrame(ttk.Frame):
     """
-    Rules list. We keep ttk.Scrollbar (same look as you like in dictionary dialog).
-    Wheel binding here is optional; RuleManager controls wheel globally on mac.
+    Rules list frame with ttk.Scrollbar (same look as your dictionary dialog).
+    Wheel binding in RuleManager is handled by binding recursively to all widgets,
+    so here we disable internal bind by default for the rules dialog.
     """
     def __init__(self, master, enable_wheel_bind: bool = True, **kwargs):
         super().__init__(master, **kwargs)
@@ -76,9 +77,8 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
         self._enable_wheel_bind = enable_wheel_bind
-
-        # bind_all を常時ではなく「入った時だけ」有効化（必要な場合のみ）
         self._wheel_bound = False
+
         if self._enable_wheel_bind:
             for w in (self.canvas, self.inner):
                 w.bind("<Enter>", self._bind_wheel, add="+")
@@ -114,7 +114,6 @@ class ScrollableFrame(ttk.Frame):
             pass
 
     def _on_mousewheel(self, event):
-        # macOS のトラックパッド等で delta が小さく (delta/120)==0 になる対策
         try:
             if not self.winfo_exists() or not self.canvas.winfo_exists():
                 return
@@ -268,7 +267,6 @@ class ApplyPickerPopup(tk.Toplevel):
         except Exception:
             pass
 
-        # mac: 小さなポップアップ風（失敗してもOK）
         if sys.platform == "darwin":
             try:
                 self.tk.call("::tk::unsupported::MacWindowStyle", "style", self._w, "help", "noActivates")
@@ -314,7 +312,7 @@ class ApplyPickerPopup(tk.Toplevel):
         inner.bind("<Configure>", _on_inner_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        # ホイールスクロール対応（トラックパッドも）
+        # ホイール（トラックパッド含む）
         self._wheel_bound = False
 
         def _on_wheel(event):
@@ -495,8 +493,6 @@ class RuleManager(tk.Toplevel):
         self._save_after_id = None
         self._switching = False
 
-        self._wheel_accum = 0  # ★トラックパッド用（delta蓄積）
-
         init_name = (initial_dict_name or "default").strip() or "default"
         if init_name not in self.store.dicts:
             init_name = "default"
@@ -504,7 +500,6 @@ class RuleManager(tk.Toplevel):
 
         self.rules: List[Rule] = self.store.get_rules(init_name)
 
-        # 前面化は App 側で制御するので、ここは通常ウィンドウ
         try:
             self.attributes("-topmost", False)
         except Exception:
@@ -541,8 +536,7 @@ class RuleManager(tk.Toplevel):
         ttk.Label(header, text="置換後").grid(row=0, column=3, sticky="w", padx=(10, 0))
         ttk.Label(header, text="操作", width=16).grid(row=0, column=4, sticky="e")
 
-        # ★RuleManager では wheel bind を ScrollableFrame 側に任せず、
-        #   ここで「ダイアログ配下なら必ずスクロール」させる
+        # ★ここでは wheel bind を ScrollableFrame に任せず、下の「全ウィジェットに直接bind」で確実化する
         self.sf = ScrollableFrame(outer, enable_wheel_bind=False)
         self.sf.grid(row=2, column=0, sticky="nsew")
 
@@ -562,55 +556,33 @@ class RuleManager(tk.Toplevel):
         self.render_rows()
 
         self.protocol("WM_DELETE_WINDOW", self.close)
-        self._install_wheel_bindtag_recursive()
 
-        # ★辞書ダイアログが開いている間、bind_all でホイールを確実に拾う
-        #   ただし「イベントがこのダイアログ配下のときだけ」処理（デグレ防止）
-        self._wheel_global_bound = False
-        self._bind_wheel_global_filtered()
+        # ★macトラックパッドでも「どこでも」スクロールできるように（辞書ダイアログ配下へ直接bind）
+        self._install_wheel_bind_recursive_widgets()
 
     # -----------------------------
-    # ★ macでもどこでもスクロールできるようにする
+    # ★ macトラックパッドでも「どこでも」スクロール（辞書ダイアログ専用）
     # -----------------------------
-    WHEEL_TAG = "RuleManagerWheelTag"
-
     def _on_rules_wheel(self, event):
         try:
             if not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
                 return "break"
         except Exception:
             return "break"
-    
+
         delta = getattr(event, "delta", 0)
         if delta == 0:
             return "break"
-    
-        # ★トラックパッドは delta が小さい（例: -1, -3, -10...）
-        #   120換算で蓄積し、一定量で1行スクロールする
-        self._wheel_accum += delta
-    
-        threshold = 120  # ホイール1ノッチ相当
-        units = 0
-    
-        # たまった分だけスクロール（複数行もOK）
-        while self._wheel_accum >= threshold:
-            units -= 1
-            self._wheel_accum -= threshold
-    
-        while self._wheel_accum <= -threshold:
-            units += 1
-            self._wheel_accum += threshold
-    
-        # deltaが小さすぎて閾値に届かない場合でも「とりあえず1行」動かす（体感改善）
+
+        # トラックパッドは delta が小さいことがあるのでフォールバック
+        units = int(-delta / 120)
         if units == 0:
             units = -1 if delta > 0 else 1
-            self._wheel_accum = 0  # 小さいdeltaの残りは捨てて暴走防止
-    
+
         try:
             self.sf.canvas.yview_scroll(units, "units")
         except Exception:
             pass
-    
         return "break"
 
     def _on_rules_wheel_linux(self, event):
@@ -627,25 +599,18 @@ class RuleManager(tk.Toplevel):
                 self.sf.canvas.yview_scroll(1, "units")
         except Exception:
             pass
-
         return "break"
 
-    def _install_wheel_bindtag_recursive(self):
-        # クラスバインド
-        try:
-            self.bind_class(self.WHEEL_TAG, "<MouseWheel>", self._on_rules_wheel, add="+")
-            self.bind_class(self.WHEEL_TAG, "<Button-4>", self._on_rules_wheel_linux, add="+")
-            self.bind_class(self.WHEEL_TAG, "<Button-5>", self._on_rules_wheel_linux, add="+")
-        except Exception:
-            pass
-
-        # 再帰で全部に付与
-        def _apply(w):
+    def _install_wheel_bind_recursive_widgets(self):
+        """
+        ★辞書ダイアログ配下の “全ウィジェット” に直接 bind する。
+        これが mac の取りこぼし（Entry上でスクロールしない等）に一番強い。
+        """
+        def _apply(w: tk.Widget):
             try:
-                tags = list(w.bindtags())
-                if self.WHEEL_TAG not in tags:
-                    tags.insert(1, self.WHEEL_TAG)
-                    w.bindtags(tuple(tags))
+                w.bind("<MouseWheel>", self._on_rules_wheel, add="+")
+                w.bind("<Button-4>", self._on_rules_wheel_linux, add="+")
+                w.bind("<Button-5>", self._on_rules_wheel_linux, add="+")
             except Exception:
                 pass
 
@@ -653,84 +618,6 @@ class RuleManager(tk.Toplevel):
                 _apply(c)
 
         _apply(self)
-
-    # ---- wheel global binding (filtered) ----
-    def _bind_wheel_global_filtered(self):
-        if self._wheel_global_bound:
-            return
-        self._wheel_global_bound = True
-        self.bind_all("<MouseWheel>", self._on_wheel_anywhere_filtered, add="+")
-        self.bind_all("<Button-4>", self._on_wheel_linux_anywhere_filtered, add="+")
-        self.bind_all("<Button-5>", self._on_wheel_linux_anywhere_filtered, add="+")
-
-    def _unbind_wheel_global_filtered(self):
-        if not self._wheel_global_bound:
-            return
-        self._wheel_global_bound = False
-        try:
-            self.unbind_all("<MouseWheel>")
-            self.unbind_all("<Button-4>")
-            self.unbind_all("<Button-5>")
-        except Exception:
-            pass
-
-    def _is_event_from_this_dialog(self, event) -> bool:
-        # event.widget がこのダイアログ配下か？
-        try:
-            w = event.widget
-            while w is not None:
-                if w == self:
-                    return True
-                w = w.master
-        except Exception:
-            pass
-
-        # ポインタ直下のウィジェットで再判定（macの取りこぼし対策）
-        try:
-            w2 = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
-            while w2 is not None:
-                if w2 == self:
-                    return True
-                w2 = w2.master
-        except Exception:
-            pass
-        return False
-
-    def _on_wheel_anywhere_filtered(self, event):
-        if not self._is_event_from_this_dialog(event):
-            return
-
-        try:
-            if not self.winfo_exists() or not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
-                return "break"
-
-            delta = getattr(event, "delta", 0)
-            if delta == 0:
-                return "break"
-
-            units = int(-1 * (delta / 120))
-            if units == 0:
-                units = -1 if delta > 0 else 1
-
-            self.sf.canvas.yview_scroll(units, "units")
-        except Exception:
-            pass
-        return "break"
-
-    def _on_wheel_linux_anywhere_filtered(self, event):
-        if not self._is_event_from_this_dialog(event):
-            return
-
-        try:
-            if not self.winfo_exists() or not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
-                return "break"
-            if event.num == 4:
-                self.sf.canvas.yview_scroll(-1, "units")
-            elif event.num == 5:
-                self.sf.canvas.yview_scroll(1, "units")
-        except Exception:
-            pass
-        return "break"
 
     # ---- front control ----
     def bring_to_front_no_focus(self):
@@ -791,10 +678,6 @@ class RuleManager(tk.Toplevel):
     def close(self):
         self.perform_save()
         try:
-            self._unbind_wheel_global_filtered()
-        except Exception:
-            pass
-        try:
             self.destroy()
         finally:
             if self.on_closed:
@@ -814,9 +697,9 @@ class RuleManager(tk.Toplevel):
         if not self.rules:
             hint = ttk.Label(self.sf.inner, text="「＋ 追加」でルールを作成できます。", foreground="gray")
             hint.pack(anchor="w", padx=6, pady=10)
-        
-        # ★追加（再生成されたEntry等にも適用）
-        self._install_wheel_bindtag_recursive()
+
+        # ★行追加/再描画で新しく作られたEntry等にも再bind（macの取りこぼし防止）
+        self._install_wheel_bind_recursive_widgets()
 
     def _create_row(self, idx: int, rule: Rule):
         row = ttk.Frame(self.sf.inner)
@@ -938,13 +821,11 @@ class App(tk.Tk):
 
         if self._use_ttk_colored_button:
             self.style = ttk.Style(self)
-            # macOS の Aqua は背景色が効きにくいので clam に切り替え
             try:
                 self.style.theme_use("clam")
             except Exception:
                 pass
 
-            # 置換実行ボタン用スタイル（緑）
             self.style.configure(
                 "Replace.TButton",
                 padding=(10, 4),
@@ -973,17 +854,17 @@ class App(tk.Tk):
 
         self.title(APP_NAME)
 
-        # ★設定の読み込み（最後の保存フォルダ）
+        # settings
         self._last_save_dir: Optional[Path] = None
         self._load_settings()
 
-        # 画面幅の「約3分の1」に寄せる（デグレなし：見た目だけ）
+        # window size
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
 
-        target_w = int(sw * 0.34)  # だいたい3分の1
-        target_w = max(740, min(980, target_w))  # 下限/上限（UI崩れ防止）
+        target_w = int(sw * 0.34)
+        target_w = max(740, min(980, target_w))
 
         target_h = int(sh * 0.88)
         target_h = max(720, min(920, target_h))
@@ -1014,18 +895,16 @@ class App(tk.Tk):
 
         self._in_hl_after_id = None
         self._in_hl_tag = "src_target"
-        self._in_hl_color = "#ffd6e7"  # 薄いピンク
+        self._in_hl_color = "#ffd6e7"
 
         self._last_loaded_text_path: Optional[Path] = None
-
         self._rule_manager_dialog: Optional[RuleManager] = None
 
-        # 置換実行中：プログレス＆編集ロック
         self._replacing = False
         self._progress_win = None
         self._progress_bar = None
 
-        # ---------- TOP MENUS (3 rows) ----------
+        # ---------- TOP MENUS ----------
         top = ttk.Frame(self, padding=(10, 8, 10, 6))
         top.pack(fill="x")
 
@@ -1042,9 +921,7 @@ class App(tk.Tk):
         self.apply_button.pack(side="left", padx=(6, 8))
         self.apply_button.bind("<Button-1>", self.toggle_apply_picker, add="+")
 
-        # --- 置換実行ボタン（OSで出し分け） ---
         if self._use_ttk_colored_button:
-            # macOS：ttk + style
             self.replace_btn = ttk.Button(
                 row1,
                 text="置換実行",
@@ -1052,7 +929,6 @@ class App(tk.Tk):
                 style="Replace.TButton",
             )
         else:
-            # Windows/Linux：tk.Button の bg が一番確実
             self.replace_btn = tk.Button(
                 row1,
                 text="置換実行",
@@ -1096,13 +972,12 @@ class App(tk.Tk):
         msg = ttk.Label(top, textvariable=self.message_var, foreground="gray")
         msg.pack(anchor="w", pady=(6, 0))
 
-        # メインを触ったら辞書を前に（ただしフォーカスは奪わない）
         self.bind("<Button-1>", self._on_main_interaction, add="+")
         self.bind("<FocusIn>", self._on_main_interaction, add="+")
 
         self.build_apply_menu(initial_select_edit=True)
 
-                # ---------- TEXT AREAS ----------
+        # ---------- TEXT AREAS ----------
         paned = ttk.PanedWindow(self, orient="vertical")
         paned.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -1112,16 +987,14 @@ class App(tk.Tk):
         paned.add(in_frame, weight=1)
         paned.add(out_frame, weight=1)
 
-        # --- 入力 ---
+        # --- 入力（gridでスクロールバー列を必ず確保） ---
         in_container = ttk.Frame(in_frame)
         in_container.pack(fill="both", expand=True)
-
         in_container.columnconfigure(1, weight=1)
         in_container.rowconfigure(0, weight=1)
 
         self.input = tk.Text(in_container, wrap="char", undo=True, font=self._text_font)
         self.input_ln = LineNumberCanvas(in_container, self.input, width=44, bg="#f3f3f3")
-
         self.in_vsb = ttk.Scrollbar(in_container, orient="vertical", command=lambda *a: self._scroll_both(*a))
         self.input.configure(yscrollcommand=self._on_input_yscroll)
 
@@ -1130,21 +1003,18 @@ class App(tk.Tk):
         self.in_vsb.grid(row=0, column=2, sticky="ns")
 
         self.input.tag_configure(self._in_hl_tag, background=self._in_hl_color)
-
         self.input.bind("<KeyRelease>", lambda _e: self.schedule_input_highlight(), add="+")
         self.input.bind("<ButtonRelease-1>", lambda _e: self.input_ln.schedule_redraw(), add="+")
         self.input.bind("<Configure>", lambda _e: self.input_ln.schedule_redraw(), add="+")
 
-        # --- 出力 ---
+        # --- 出力（gridでスクロールバー列を必ず確保） ---
         out_container = ttk.Frame(out_frame)
         out_container.pack(fill="both", expand=True)
-
         out_container.columnconfigure(1, weight=1)
         out_container.rowconfigure(0, weight=1)
 
         self.output = tk.Text(out_container, wrap="char", font=self._text_font)
         self.output_ln = LineNumberCanvas(out_container, self.output, width=44, bg="#f3f3f3")
-
         self.out_vsb = ttk.Scrollbar(out_container, orient="vertical", command=lambda *a: self._scroll_both(*a))
         self.output.configure(yscrollcommand=self._on_output_yscroll)
 
@@ -1173,7 +1043,6 @@ class App(tk.Tk):
         self.output_ln.redraw()
         self.schedule_input_highlight()
 
-        # ★アプリ終了（設定保存）
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # -----------------------------
@@ -1215,7 +1084,6 @@ class App(tk.Tk):
             pass
 
     def _on_main_interaction(self, _event=None):
-        # メインウィンドウを触ったら、辞書ダイアログを前に（フォーカスは奪わない）
         if self._rule_manager_dialog is not None and self._rule_manager_dialog.winfo_exists():
             try:
                 self.after(1, self._rule_manager_dialog.bring_to_front_no_focus)
@@ -1571,7 +1439,6 @@ class App(tk.Tk):
         self.output_ln.redraw()
         self.schedule_input_highlight()
 
-    # --- persistence ---
     def save_rules(self):
         self.store.save()
 
@@ -1599,7 +1466,6 @@ class App(tk.Tk):
             on_closed=_closed,
         )
 
-        # ★メインと同じ幅、初期表示は「下端をメイン下端に合わせる」（実高さで2段階補正）
         try:
             self.update_idletasks()
             self._rule_manager_dialog.update_idletasks()
@@ -1610,9 +1476,7 @@ class App(tk.Tk):
             main_h = self.winfo_height()
             main_bottom = main_y + main_h
 
-            # まずは希望サイズ（出力枠の高さをベース）
             out_h = self.output.winfo_height()
-
             req_w = self._rule_manager_dialog.winfo_reqwidth()
             req_h = self._rule_manager_dialog.winfo_reqheight()
 
@@ -1621,19 +1485,16 @@ class App(tk.Tk):
             h = max(320, out_h, req_h)
 
             x = main_x
-            y = main_bottom - h - Y_OFFSET  # 下端合わせ（仮）
+            y = main_bottom - h - Y_OFFSET
 
-            # 画面外に出ないようにクリップ
             sw = self.winfo_screenwidth()
             sh = self.winfo_screenheight()
             x = max(0, min(x, sw - w))
             y = max(0, min(y, sh - h))
 
-            # 1回目：仮配置
             self._rule_manager_dialog.geometry(f"{w}x{h}+{x}+{y}")
             self._rule_manager_dialog.update_idletasks()
 
-            # 2回目：実際に描画後の「実高さ」で下端を再計算（ここが重要）
             real_h = self._rule_manager_dialog.winfo_height()
             y2 = main_bottom - real_h - Y_OFFSET
             y2 = max(0, min(y2, sh - real_h))
@@ -1659,11 +1520,8 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # 入力/出力の編集を止める
         self._set_edit_lock(True)
-
         self._show_progress("置換中...")
-
         self.after(10, self._do_replace_impl)
 
     def _do_replace_impl(self):
@@ -1683,7 +1541,6 @@ class App(tk.Tk):
             for r in enabled_rules:
                 out = out.replace(r.src, r.dst)
 
-            # output は disabled 中なので一時的に normal にして書き換える
             self.output.config(state="normal")
             self.output.delete("1.0", "end")
             self.output.insert("1.0", out)
@@ -1706,8 +1563,6 @@ class App(tk.Tk):
                 self.replace_btn.config(state="normal")
             except Exception:
                 pass
-
-            # 入力/出力の編集ロック解除
             self._set_edit_lock(False)
 
     # --- output actions ---
@@ -1723,7 +1578,6 @@ class App(tk.Tk):
         initialdir = None
         initialfile = None
 
-        # 最後に保存したフォルダを優先（アプリ終了後も保持）
         if self._last_save_dir and self._last_save_dir.exists():
             initialdir = str(self._last_save_dir)
         elif self._last_loaded_text_path and self._last_loaded_text_path.exists():
