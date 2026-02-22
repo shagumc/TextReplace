@@ -560,11 +560,82 @@ class RuleManager(tk.Toplevel):
         self.render_rows()
 
         self.protocol("WM_DELETE_WINDOW", self.close)
+        self._install_wheel_bindtag_recursive()
 
         # ★辞書ダイアログが開いている間、bind_all でホイールを確実に拾う
         #   ただし「イベントがこのダイアログ配下のときだけ」処理（デグレ防止）
         self._wheel_global_bound = False
         self._bind_wheel_global_filtered()
+
+    # -----------------------------
+    # ★ macでもどこでもスクロールできるようにする
+    # -----------------------------
+    WHEEL_TAG = "RuleManagerWheelTag"
+
+    def _on_rules_wheel(self, event):
+        try:
+            if not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
+                return "break"
+        except Exception:
+            return "break"
+
+        delta = getattr(event, "delta", 0)
+
+        # mac対策（deltaが小さい場合あり）
+        if delta == 0:
+            return "break"
+
+        units = int(-delta / 120)
+        if units == 0:
+            units = -1 if delta > 0 else 1
+
+        try:
+            self.sf.canvas.yview_scroll(units, "units")
+        except Exception:
+            pass
+
+        return "break"
+
+    def _on_rules_wheel_linux(self, event):
+        try:
+            if not self.sf.winfo_exists() or not self.sf.canvas.winfo_exists():
+                return "break"
+        except Exception:
+            return "break"
+
+        try:
+            if event.num == 4:
+                self.sf.canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.sf.canvas.yview_scroll(1, "units")
+        except Exception:
+            pass
+
+        return "break"
+
+    def _install_wheel_bindtag_recursive(self):
+        # クラスバインド
+        try:
+            self.bind_class(self.WHEEL_TAG, "<MouseWheel>", self._on_rules_wheel, add="+")
+            self.bind_class(self.WHEEL_TAG, "<Button-4>", self._on_rules_wheel_linux, add="+")
+            self.bind_class(self.WHEEL_TAG, "<Button-5>", self._on_rules_wheel_linux, add="+")
+        except Exception:
+            pass
+
+        # 再帰で全部に付与
+        def _apply(w):
+            try:
+                tags = list(w.bindtags())
+                if self.WHEEL_TAG not in tags:
+                    tags.insert(1, self.WHEEL_TAG)
+                    w.bindtags(tuple(tags))
+            except Exception:
+                pass
+
+            for c in w.winfo_children():
+                _apply(c)
+
+        _apply(self)
 
     # ---- wheel global binding (filtered) ----
     def _bind_wheel_global_filtered(self):
@@ -726,6 +797,9 @@ class RuleManager(tk.Toplevel):
         if not self.rules:
             hint = ttk.Label(self.sf.inner, text="「＋ 追加」でルールを作成できます。", foreground="gray")
             hint.pack(anchor="w", padx=6, pady=10)
+        
+        # ★追加（再生成されたEntry等にも適用）
+        self._install_wheel_bindtag_recursive()
 
     def _create_row(self, idx: int, rule: Rule):
         row = ttk.Frame(self.sf.inner)
