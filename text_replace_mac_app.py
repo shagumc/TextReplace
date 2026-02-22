@@ -1110,6 +1110,55 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def _refresh_scrollbars(self):
+        """macのTXT読み込み直後など、Textのyviewが遅れて確定するケースの補正用"""
+        try:
+            # いったん先頭を見せてレイアウト確定を促す
+            self.input.see("1.0")
+            self.output.see("1.0")
+        except Exception:
+            pass
+    
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+    
+        # input
+        try:
+            first, last = self.input.yview()
+            self._on_input_yscroll(first, last)
+        except Exception:
+            pass
+    
+        # output
+        try:
+            first, last = self.output.yview()
+            self._on_output_yscroll(first, last)
+        except Exception:
+            pass
+    
+        # 行番号も追従
+        try:
+            self.input_ln.schedule_redraw()
+            self.output_ln.schedule_redraw()
+        except Exception:
+            pass
+    
+    
+    def _refresh_scrollbars_later(self):
+        """
+        mac対策：idle後 + 少し後（描画確定後）にもう一回更新する
+        """
+        try:
+            self.after_idle(self._refresh_scrollbars)
+        except Exception:
+            pass
+        try:
+            self.after(30, self._refresh_scrollbars)   # 30ms後（環境によって必要）
+        except Exception:
+            pass
+
     # -----------------------------
     # Settings (persist)
     # -----------------------------
@@ -1517,6 +1566,7 @@ class App(tk.Tk):
         self.input_ln.redraw()
         self.output_ln.redraw()
         self.schedule_input_highlight()
+        self._refresh_scrollbars_later()
 
     def save_rules(self):
         self.store.save()
