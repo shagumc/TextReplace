@@ -1110,54 +1110,72 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _refresh_scrollbars(self):
-        """macのTXT読み込み直後など、Textのyviewが遅れて確定するケースの補正用"""
-        try:
-            # いったん先頭を見せてレイアウト確定を促す
-            self.input.see("1.0")
-            self.output.see("1.0")
-        except Exception:
-            pass
-    
-        try:
-            self.update_idletasks()
-        except Exception:
-            pass
-    
-        # input
-        try:
-            first, last = self.input.yview()
-            self._on_input_yscroll(first, last)
-        except Exception:
-            pass
-    
-        # output
-        try:
-            first, last = self.output.yview()
-            self._on_output_yscroll(first, last)
-        except Exception:
-            pass
-    
-        # 行番号も追従
-        try:
-            self.input_ln.schedule_redraw()
-            self.output_ln.schedule_redraw()
-        except Exception:
-            pass
-    
-    
-    def _refresh_scrollbars_later(self):
+    def _force_text_scroll_calc(self, text: tk.Text):
         """
-        mac対策：idle後 + 少し後（描画確定後）にもう一回更新する
+        mac対策：Textのyview/yscrollcommandが、実スクロールが起きるまで確定しない場合がある。
+        そこで「見えないスクロール」を一瞬だけ発生させて計算を確定させる。
         """
         try:
-            self.after_idle(self._refresh_scrollbars)
+            text.update_idletasks()
         except Exception:
             pass
+    
         try:
-            self.after(30, self._refresh_scrollbars)   # 30ms後（環境によって必要）
+            # 先頭へ（任意）
+            text.yview_moveto(0.0)
         except Exception:
             pass
+    
+        try:
+            # ★ここが本丸：1行だけ下→上（ほぼ見た目変化なし）
+            text.yview_scroll(1, "units")
+            text.yview_scroll(-1, "units")
+        except Exception:
+            pass
+    
+    
+    def _refresh_scrollbars_mac_hard(self, tries: int = 6):
+        """
+        macでTXT読み込み直後にスクロールバーがデフォルト表示になる問題の“確実版”。
+        複数回リトライしつつ、Text側のスクロール計算を強制確定させる。
+        """
+        def _one_try(n: int):
+            try:
+                # Textの内部計算を先に確定させる
+                self._force_text_scroll_calc(self.input)
+                self._force_text_scroll_calc(self.output)
+    
+                # スクロールバーへ反映（yscrollcommand相当）
+                try:
+                    f, l = self.input.yview()
+                    self._on_input_yscroll(f, l)
+                except Exception:
+                    pass
+    
+                try:
+                    f, l = self.output.yview()
+                    self._on_output_yscroll(f, l)
+                except Exception:
+                    pass
+    
+                # 行番号も更新
+                try:
+                    self.input_ln.schedule_redraw()
+                    self.output_ln.schedule_redraw()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    
+            if n > 0:
+                # 少しずつ遅延を伸ばして数回（描画タイミング差を吸収）
+                delay = 20 if n >= 4 else 60 if n >= 2 else 120
+                try:
+                    self.after(delay, lambda: _one_try(n - 1))
+                except Exception:
+                    pass
+    
+        _one_try(tries)
 
     # -----------------------------
     # Settings (persist)
@@ -1566,7 +1584,8 @@ class App(tk.Tk):
         self.input_ln.redraw()
         self.output_ln.redraw()
         self.schedule_input_highlight()
-        self._refresh_scrollbars_later()
+        if sys.platform == "darwin":
+            self._refresh_scrollbars_mac_hard()
 
     def save_rules(self):
         self.store.save()
