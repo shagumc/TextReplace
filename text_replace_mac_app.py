@@ -1110,72 +1110,74 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _force_text_scroll_calc(self, text: tk.Text):
+    def _set_thumb_by_displaylines(self, text: tk.Text, sb: ttk.Scrollbar):
         """
-        mac対策：Textのyview/yscrollcommandが、実スクロールが起きるまで確定しない場合がある。
-        そこで「見えないスクロール」を一瞬だけ発生させて計算を確定させる。
+        mac対策：yscrollcommandがすぐ更新されない個体向け。
+        wrap後のdisplaylinesを使って、スクロールバーのつまみサイズを手動で反映する。
         """
         try:
+            self.update_idletasks()
             text.update_idletasks()
         except Exception:
             pass
     
         try:
-            # 先頭へ（任意）
-            text.yview_moveto(0.0)
+            # 総表示行数（折返し込み）
+            total = text.count("1.0", "end-1c", "displaylines")[0]
+            if total <= 0:
+                total = 1
         except Exception:
-            pass
+            # フォールバック：論理行数
+            try:
+                total = int(text.index("end-1c").split(".")[0])
+            except Exception:
+                total = 1
+    
+        # 現在表示できる行数（概算）
+        try:
+            info = text.dlineinfo("1.0")  # (x, y, w, h, baseline)
+            line_h = info[3] if info and info[3] else 16
+            vis = max(1, int(text.winfo_height() / max(1, line_h)))
+        except Exception:
+            vis = 10
+    
+        last = min(1.0, vis / max(1, total))
     
         try:
-            # ★ここが本丸：1行だけ下→上（ほぼ見た目変化なし）
-            text.yview_scroll(1, "units")
-            text.yview_scroll(-1, "units")
+            # 先頭表示前提のつまみサイズ（必要なら first も計算可能だが読み込み直後は 0 でOK）
+            sb.set(0.0, last)
         except Exception:
             pass
     
     
-    def _refresh_scrollbars_mac_hard(self, tries: int = 6):
+    def _refresh_thumbs_after_load(self):
         """
-        macでTXT読み込み直後にスクロールバーがデフォルト表示になる問題の“確実版”。
-        複数回リトライしつつ、Text側のスクロール計算を強制確定させる。
+        TXT読み込み直後のつまみサイズ補正（macで確実にするため複数回）
         """
-        def _one_try(n: int):
+        def _tick(n: int):
             try:
-                # Textの内部計算を先に確定させる
-                self._force_text_scroll_calc(self.input)
-                self._force_text_scroll_calc(self.output)
+                # 読み込み直後は先頭に合わせておく（任意）
+                self.input.yview_moveto(0.0)
+                self.output.yview_moveto(0.0)
+            except Exception:
+                pass
     
-                # スクロールバーへ反映（yscrollcommand相当）
-                try:
-                    f, l = self.input.yview()
-                    self._on_input_yscroll(f, l)
-                except Exception:
-                    pass
+            # つまみサイズを手動反映
+            self._set_thumb_by_displaylines(self.input, self.in_vsb)
+            self._set_thumb_by_displaylines(self.output, self.out_vsb)
     
-                try:
-                    f, l = self.output.yview()
-                    self._on_output_yscroll(f, l)
-                except Exception:
-                    pass
-    
-                # 行番号も更新
-                try:
-                    self.input_ln.schedule_redraw()
-                    self.output_ln.schedule_redraw()
-                except Exception:
-                    pass
+            # ついでに行番号
+            try:
+                self.input_ln.schedule_redraw()
+                self.output_ln.schedule_redraw()
             except Exception:
                 pass
     
             if n > 0:
-                # 少しずつ遅延を伸ばして数回（描画タイミング差を吸収）
-                delay = 20 if n >= 4 else 60 if n >= 2 else 120
-                try:
-                    self.after(delay, lambda: _one_try(n - 1))
-                except Exception:
-                    pass
+                # macはタイミングがブレるので段階的に数回
+                self.after(60, lambda: _tick(n - 1))
     
-        _one_try(tries)
+        _tick(4)
 
     # -----------------------------
     # Settings (persist)
@@ -1584,8 +1586,9 @@ class App(tk.Tk):
         self.input_ln.redraw()
         self.output_ln.redraw()
         self.schedule_input_highlight()
+
         if sys.platform == "darwin":
-            self._refresh_scrollbars_mac_hard()
+            self._refresh_thumbs_after_load()
 
     def save_rules(self):
         self.store.save()
